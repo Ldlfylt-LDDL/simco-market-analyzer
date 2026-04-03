@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 航空市场分析器
 // @namespace    simco-aero-market-analyzer
-// @version      1.2
+// @version      1.11
 // @description  实时抓取并解析 SimCompanies 聊天室中 SOR/BFR/JUM/LUX/SEP/SAT 的买卖报价，按产品/等级汇总
 // @author
 // @match        https://www.simcompanies.com/*
@@ -40,7 +40,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.1';
+  const VERSION        = '1.11';
   const CHATROOM       = 'X';
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
@@ -75,6 +75,7 @@
         <span>✈ 航空市场分析器<span id="scma-title-note">格式不规范的报价可能遗漏</span></span>
         <div style="display:flex;gap:6px;align-items:center">
           <button id="scma-copy" title="复制 JSON 结果">📋</button>
+          <button id="scma-help" title="使用帮助">?</button>
           <button id="scma-close">✕</button>
         </div>
       </div>
@@ -112,6 +113,7 @@
     panelEl.querySelector('#scma-search').onclick = startSearch;
     panelEl.querySelector('#scma-stop').onclick   = stopSearch;
     panelEl.querySelector('#scma-copy').onclick   = copyResults;
+    panelEl.querySelector('#scma-help').onclick   = showHelpPopup;
     panelEl.querySelector('#scma-update-btn').onclick = e => { e.preventDefault(); checkForUpdates(); };
 
     makeDraggable(panelEl, panelEl.querySelector('#scma-header'));
@@ -679,6 +681,62 @@
     });
   }
 
+  // ── Help popup ────────────────────────────────────────────────────────
+  function showHelpPopup() {
+    let el = document.getElementById('scma-help-overlay');
+    if (el) { el.style.display = 'flex'; return; }
+
+    el = document.createElement('div');
+    el.id = 'scma-help-overlay';
+    el.innerHTML = `
+      <div id="scma-help-box">
+        <div id="scma-help-header">
+          <span>使用说明</span>
+          <button id="scma-help-close">✕</button>
+        </div>
+        <div id="scma-help-body">
+          <h3>基本使用</h3>
+          <p>点击右下角 <b>✈ 市场</b> 按钮打开面板。在<b>时</b>输入框中填写想往前追溯的小时数（默认 8 小时），点击 <b>🔍 搜索</b> 开始抓取聊天室 X 中的消息。</p>
+
+          <h3>结果表格</h3>
+          <p>结果按产品（SOR / BFR / JUM / LUX / SEP / SAT）分组，每个产品显示一张买卖汇总表：</p>
+          <ul>
+            <li><b>等级</b> — 报价对应的品质（Q0–Q9）；<span class="scma-help-tag buy">BUY</span> 列为求购，<span class="scma-help-tag sell">SELL</span> 列为出售。</li>
+            <li>价格旁的 <b>×N</b> 表示有 N 条相同报价，可点击查看原始消息。</li>
+            <li><span style="text-decoration:line-through;opacity:.6">划线价格</span> 表示对应消息已被撤回。</li>
+            <li><b>无明确等级和报价</b> 行收录了未注明品质或价格的提及。</li>
+          </ul>
+
+          <h3>原始消息</h3>
+          <p>点击任意价格标签或 ×N 按钮，弹出原始消息列表。每条消息显示：</p>
+          <ul>
+            <li>发送公司名（蓝色）+ 发送时间（如 <i>3分钟前</i>）</li>
+            <li>完整原文（产品代码已替换为图标）</li>
+            <li><b>复制名字</b> 按钮，可将公司名复制到剪贴板</li>
+          </ul>
+          <p>点击弹窗外任意位置或按 <b>Esc</b> 关闭弹窗。</p>
+
+          <h3>识别范围</h3>
+          <p>支持识别 <b>:re-91: (SOR)、:re-94: (BFR)、:re-95: (JUM)、:re-96: (LUX)、:re-97: (SEP)、:re-99: (SAT)</b> 及其常见英文缩写（如 JUMBO、LUXJET、SATELLITE 等）。</p>
+          <p>价格格式支持 <b>@900k</b>、<b>at 900k</b>、<b>$900k</b> 等写法，以及 <b>Q6/8 @900/950k</b> 式的多等级/价格对，和 <b>±Xk/Q</b> 式的逐级差价展开。</p>
+          <p>格式较为特殊的报价（如将价格写在下一行、使用非常规符号等）<b>可能无法识别</b>，结果仅供参考。</p>
+
+          <h3>其他功能</h3>
+          <ul>
+            <li>📋 按钮：将当前结果导出为 JSON，方便进一步处理。</li>
+            <li>搜索完成后关闭面板再重新打开，上一次的结果会自动保留。</li>
+            <li>展开底部「关于」可检查是否有新版本。</li>
+            <li>面板可拖动，抓住顶部标题栏即可移动。</li>
+          </ul>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+
+    el.querySelector('#scma-help-close').onclick = () => { el.style.display = 'none'; };
+    el.addEventListener('click', ev => { if (ev.target === el) el.style.display = 'none'; });
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && el.style.display !== 'none') el.style.display = 'none'; });
+  }
+
   // ── Styles ────────────────────────────────────────────────────────────
   function injectStyles() {
     const css = `
@@ -873,6 +931,60 @@
         width: 20px; height: 20px; vertical-align: middle;
         display: inline-block; margin: 0 1px;
       }
+
+      /* ── Help button ── */
+      #scma-help {
+        font-size: 12px !important; font-weight: 700;
+        border: 1px solid #334155 !important; border-radius: 50% !important;
+        width: 18px; height: 18px; padding: 0 !important;
+        display: flex; align-items: center; justify-content: center;
+        color: #64748b !important;
+      }
+      #scma-help:hover { color: #7dd3fc !important; border-color: #7dd3fc !important; }
+
+      /* ── Help overlay ── */
+      #scma-help-overlay {
+        display: flex; position: fixed; inset: 0; z-index: 2147483642;
+        background: #00000080; align-items: center; justify-content: center;
+      }
+      #scma-help-box {
+        background: #0f172a; border: 1px solid #334155; border-radius: 12px;
+        width: 480px; max-height: 80vh; display: flex; flex-direction: column;
+        font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;
+        color: #e2e8f0; box-shadow: 0 8px 40px #000a;
+      }
+      #scma-help-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 10px 14px; background: #1e293b;
+        border-bottom: 1px solid #334155; border-radius: 12px 12px 0 0;
+        font-weight: 700; color: #7dd3fc; font-size: 13px; flex-shrink: 0;
+      }
+      #scma-help-header button {
+        background: none; border: none; cursor: pointer;
+        color: #64748b; font-size: 14px; line-height: 1;
+      }
+      #scma-help-header button:hover { color: #f87171; }
+      #scma-help-body {
+        padding: 14px 16px; overflow-y: auto; line-height: 1.7;
+        color: #cbd5e1;
+      }
+      #scma-help-body h3 {
+        color: #7dd3fc; font-size: 11px; margin: 12px 0 4px;
+        text-transform: uppercase; letter-spacing: .05em;
+        border-bottom: 1px solid #1e293b; padding-bottom: 3px;
+      }
+      #scma-help-body h3:first-child { margin-top: 0; }
+      #scma-help-body p { margin: 4px 0; }
+      #scma-help-body ul { margin: 4px 0 4px 16px; padding: 0; }
+      #scma-help-body li { margin-bottom: 3px; }
+      #scma-help-body b { color: #e2e8f0; }
+      #scma-help-body i { color: #94a3b8; }
+      .scma-help-tag {
+        display: inline-block; font-size: 10px; padding: 0 5px;
+        border-radius: 3px; font-weight: 700;
+      }
+      .scma-help-tag.buy  { background: #14532d; color: #86efac; }
+      .scma-help-tag.sell { background: #7f1d1d; color: #fca5a5; }
     `;
     const s = document.createElement('style');
     s.id          = 'scma-styles';
