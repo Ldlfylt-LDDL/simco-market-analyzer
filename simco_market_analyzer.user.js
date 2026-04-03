@@ -355,8 +355,12 @@
       const postText = line.slice(gEnd, i < groups.length - 1 ? bounds[i + 1].start : line.length);
       const intra    = line.slice(gStart, gEnd);
 
-      const lineQualities            = extractQualities(preText + ' ' + intra + ' ' + postText);
-      const { price, prices, delta } = extractPriceAndDelta(postText);
+      // Trim postText at any new direction keyword — qualities/prices after it belong to a different product
+      const dirBoundary = postText.search(/\b(sell(?:ing)?|buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|offer(?:ing)?)\b/i);
+      const safePost = dirBoundary > 0 ? postText.slice(0, dirBoundary) : postText;
+
+      const lineQualities            = extractQualities(preText + ' ' + intra + ' ' + safePost);
+      const { price, prices, delta } = extractPriceAndDelta(safePost);
       // Use qualities found on this line; fall back to inherited quality if none
       const qualities = lineQualities.length ? lineQualities
                       : (fallbackQuality     ? [fallbackQuality] : []);
