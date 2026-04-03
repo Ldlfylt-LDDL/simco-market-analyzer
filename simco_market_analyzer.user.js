@@ -215,9 +215,16 @@
   function parseMessage(msg) {
     const company = msg.sender?.company || '?';
     const text    = msg.body || '';
-    const lines   = text.split('\n');
-    const results = [];
-    let curDir    = null;
+    const lines   = text.split('\n').map(l => l.trim()).filter(l => l);
+
+    // Try structured template first (Quality:/Price: labels on separate lines)
+    const structured = tryStructuredParse(lines, company);
+    if (structured.length > 0) return structured;
+
+    // Normal line-by-line parsing
+    const results  = [];
+    let curDir     = null;
+    let curQuality = null; // carries quality declared on a product-less line to the next product lines
 
     for (const line of lines) {
       if (RENT_RE.test(line)) continue;
@@ -225,9 +232,48 @@
       if (lineDir) curDir = lineDir;
       const dir = lineDir || curDir;
       if (!dir) continue;
-      results.push(...parseLineProducts(line, company, dir));
+
+      // If the line has no product mentions, check if it carries a quality forward
+      const mentions = findAllMentions(line);
+      if (!mentions.length) {
+        const quals = extractQualities(line);
+        if (quals.length > 0) curQuality = quals[0];
+        continue;
+      }
+
+      results.push(...parseLineProducts(line, company, dir, curQuality));
     }
     return results;
+  }
+
+  // Handle structured listing format:
+  //   :re-97: ... (product codes)
+  //   Product : SEP
+  //   Quality : Q6⭐️...
+  //   Price   : $37.6k
+  function tryStructuredParse(lines, company) {
+    const qualLine  = lines.find(l => /[Qq]uality\s*[:：]\s*[Qq]\d+/.test(l));
+    const priceLine = lines.find(l => /[Pp]rice\s*[:：]\s*[\$\$]?\s*\d/.test(l));
+    if (!qualLine || !priceLine) return [];
+
+    // Direction: scan all lines, default to 'sell' (structured posts are almost always sellers)
+    const dir = detectDir(lines.join(' ')) || 'sell';
+
+    // Quality
+    const qm      = qualLine.match(/[Qq]uality\s*[:：]\s*([Qq]\d+)/);
+    const quality  = qm ? `Q${parseInt(qm[1].slice(1))}` : null;
+
+    // Price
+    const pm    = priceLine.match(/[Pp]rice\s*[:：]\s*\$?\s*(\d+[\.,]?\d*)\s*[kK]/);
+    const price = pm ? Math.round(parseFloat(pm[1].replace(',', '.')) * 1000) : null;
+
+    // Products: scan all lines
+    const seen = new Set();
+    for (const line of lines)
+      for (const m of findAllMentions(line)) seen.add(m.product);
+    if (!seen.size) return [];
+
+    return [...seen].map(p => ({ company, direction: dir, product: p, quality, price, from_delta: false }));
   }
 
   // ── Direction detection ───────────────────────────────────────────────
@@ -282,7 +328,7 @@
   }
 
   // ── Extract quotes for each product group in a line ───────────────────
-  function parseLineProducts(line, company, dir) {
+  function parseLineProducts(line, company, dir, fallbackQuality = null) {
     const mentions = findAllMentions(line);
     if (!mentions.length) return [];
 
@@ -298,11 +344,18 @@
       const postText = line.slice(gEnd, i < groups.length - 1 ? bounds[i + 1].start : line.length);
       const intra    = line.slice(gStart, gEnd);
 
-      const qualities        = extractQualities(preText + ' ' + intra + ' ' + postText);
-      const { price, delta } = extractPriceAndDelta(postText);
+      const lineQualities            = extractQualities(preText + ' ' + intra + ' ' + postText);
+      const { price, prices, delta } = extractPriceAndDelta(postText);
+      // Use qualities found on this line; fall back to inherited quality if none
+      const qualities = lineQualities.length ? lineQualities
+                      : (fallbackQuality     ? [fallbackQuality] : []);
 
       if (!qualities.length) {
         results.push({ company, direction: dir, product, quality: null, price, from_delta: false });
+      } else if (prices && prices.length === qualities.length) {
+        // Slash-paired notation: Q6/8 @935/965k → pair each quality with its price
+        for (let qi = 0; qi < qualities.length; qi++)
+          results.push({ company, direction: dir, product, quality: qualities[qi], price: prices[qi], from_delta: false });
       } else {
         for (const q of qualities) {
           if (delta !== null && price !== null) {
@@ -328,8 +381,12 @@
   function extractQualities(text) {
     const seen = new Set();
     let m;
-    const re = /[Qq](\d{1,2})/g;
-    while ((m = re.exec(text)) !== null) seen.add(`Q${parseInt(m[1])}`);
+    // Capture Q6 and slash-separated extras: Q6/8 → Q6, Q8
+    const re = /[Qq](\d{1,2})((?:\/\d{1,2})*)/g;
+    while ((m = re.exec(text)) !== null) {
+      seen.add(`Q${parseInt(m[1])}`);
+      if (m[2]) for (const n of m[2].slice(1).split('/')) if (n) seen.add(`Q${parseInt(n)}`);
+    }
     return [...seen].sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1)));
   }
 
@@ -346,7 +403,12 @@
       delta = dm[1] === '-' ? -val : val;
     }
 
-    // Price
+    // Slash-paired prices: @935/965k → [935000, 965000]
+    let prices = null;
+    const sp = /[@$]\s*(\d{1,4}(?:\.\d+)?)\/(\d{1,4}(?:\.\d+)?)\s*[kK]/.exec(t);
+    if (sp) prices = [Math.round(parseFloat(sp[1]) * 1000), Math.round(parseFloat(sp[2]) * 1000)];
+
+    // Single price
     let price = null, m;
     m = /\bat\s+(\d{1,4}(?:\.\d+)?)\s*[kK]/i.exec(t);
     if (m) { price = Math.round(parseFloat(m[1]) * 1000); }
@@ -361,7 +423,8 @@
       m = /(?<![/\d])(\d{2,4}(?:\.\d+)?)\s*[kK](?![a-zA-Z/])/.exec(tc);
       if (m) price = Math.round(parseFloat(m[1]) * 1000);
     }
-    return { price, delta };
+    if (!price && prices) price = prices[0];
+    return { price, prices, delta };
   }
 
   // ── Build summary ─────────────────────────────────────────────────────
