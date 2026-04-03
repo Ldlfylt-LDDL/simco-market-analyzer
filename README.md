@@ -5,6 +5,9 @@
 包含两个功能模块：
 - **✈ 航天** — 航天产品（SOR/BFR/JUM/LUX/SEP/SAT）的专项报价汇总
 - **🌐 全市场** — 任意产品的报价查询，通过关注列表自定义监控品类
+<img width="288" height="403" alt="image" src="https://github.com/user-attachments/assets/ea782ce3-6197-48f3-913f-d02325e61ffd" />
+<img width="287" height="506" alt="image" src="https://github.com/user-attachments/assets/fab40bf5-55f4-4dd5-8b87-274b1c6d9880" />
+<img width="270" height="506" alt="image" src="https://github.com/user-attachments/assets/9036a0b7-05e1-4780-9235-00dd4aed26c6" />
 
 ## 安装
 
@@ -30,7 +33,7 @@
 ### 使用方法
 
 1. 点击 **✈ 航天** 打开面板
-2. 设置搜索时间范围（默认 8 小时），固定抓取航天聊天室 (X)
+2. 设置搜索时间范围（默认 4 小时），固定抓取航天聊天室 (X)
 3. 点击 **🔍 搜索**，结果按产品 / 质量等级展示买卖双方报价
 
 ```
@@ -81,6 +84,7 @@ Q5          90k×1  93k×1    94k×1  94.5k×1
 - 关闭面板后重新打开可恢复上次搜索结果（内存缓存）
 - 面板可拖动，支持随时停止搜索
 - **自动更新检测**：Tampermonkey 定期检查新版本；也可在面板底部"关于"区域手动点击"检查更新"
+- 自带查询限速，约1.2页/秒，不滥用api
 
 ## 注意
 
