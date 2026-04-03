@@ -255,10 +255,11 @@
     const company   = msg.sender?.company || '?';
     const text      = msg.body || '';
     const retracted = !!msg.retracted;
+    const datetime  = msg.datetime || null;
     const lines     = text.split('\n').map(l => l.trim()).filter(l => l);
 
     // Try structured template first (Quality:/Price: labels on separate lines)
-    const structured = tryStructuredParse(lines, company, text, retracted);
+    const structured = tryStructuredParse(lines, company, text, retracted, datetime);
     if (structured.length > 0) return structured;
 
     // Normal line-by-line parsing
@@ -281,7 +282,7 @@
         continue;
       }
 
-      results.push(...parseLineProducts(line, company, dir, curQuality, text, retracted));
+      results.push(...parseLineProducts(line, company, dir, curQuality, text, retracted, datetime));
     }
     return results;
   }
@@ -291,7 +292,7 @@
   //   Product : SEP
   //   Quality : Q6⭐️...
   //   Price   : $37.6k
-  function tryStructuredParse(lines, company, body = '', retracted = false) {
+  function tryStructuredParse(lines, company, body = '', retracted = false, datetime = null) {
     const qualLine  = lines.find(l => /[Qq]uality\s*[:：]\s*[Qq]\d+/.test(l));
     const priceLine = lines.find(l => /[Pp]rice\s*[:：]\s*[\$\$]?\s*\d/.test(l));
     if (!qualLine || !priceLine) return [];
@@ -313,7 +314,7 @@
       for (const m of findAllMentions(line)) seen.add(m.product);
     if (!seen.size) return [];
 
-    return [...seen].map(p => ({ company, direction: dir, product: p, quality, price, from_delta: false, body, retracted }));
+    return [...seen].map(p => ({ company, direction: dir, product: p, quality, price, from_delta: false, body, retracted, datetime }));
   }
 
   // ── Direction detection ───────────────────────────────────────────────
@@ -368,7 +369,7 @@
   }
 
   // ── Extract quotes for each product group in a line ───────────────────
-  function parseLineProducts(line, company, dir, fallbackQuality = null, body = '', retracted = false) {
+  function parseLineProducts(line, company, dir, fallbackQuality = null, body = '', retracted = false, datetime = null) {
     const mentions = findAllMentions(line);
     if (!mentions.length) return [];
 
@@ -395,11 +396,11 @@
                       : (fallbackQuality     ? [fallbackQuality] : []);
 
       if (!qualities.length) {
-        results.push({ company, direction: dir, product, quality: null, price, from_delta: false, body, retracted });
+        results.push({ company, direction: dir, product, quality: null, price, from_delta: false, body, retracted, datetime });
       } else if (prices && prices.length === qualities.length) {
         // Slash-paired notation: Q6/8 @935/965k → pair each quality with its price
         for (let qi = 0; qi < qualities.length; qi++)
-          results.push({ company, direction: dir, product, quality: qualities[qi], price: prices[qi], from_delta: false, body, retracted });
+          results.push({ company, direction: dir, product, quality: qualities[qi], price: prices[qi], from_delta: false, body, retracted, datetime });
       } else {
         for (const q of qualities) {
           if (delta !== null && price !== null) {
@@ -409,11 +410,11 @@
                 company, direction: dir, product,
                 quality: `Q${qn}`,
                 price: Math.round(price + delta * (qn - base)),
-                from_delta: true, base_quality: q, delta_per_q: delta, body, retracted,
+                from_delta: true, base_quality: q, delta_per_q: delta, body, retracted, datetime,
               });
             }
           } else {
-            results.push({ company, direction: dir, product, quality: q, price, from_delta: false, body, retracted });
+            results.push({ company, direction: dir, product, quality: q, price, from_delta: false, body, retracted, datetime });
           }
         }
       }
@@ -483,7 +484,7 @@
       // deduplicate by company+body
       const sig = q.company + '\x00' + (q.body || '');
       if (!tree[prod][qual][dir][key].some(e => e.sig === sig))
-        tree[prod][qual][dir][key].push({ name: q.company, body: q.body || '', retracted: !!q.retracted, sig });
+        tree[prod][qual][dir][key].push({ name: q.company, body: q.body || '', retracted: !!q.retracted, datetime: q.datetime || null, sig });
     }
     const result = {};
     for (const [prod, quals] of Object.entries(tree)) {
@@ -501,7 +502,7 @@
               price: p === 'no_price' ? null : parseInt(p),
               count: arr.length,
               companies: [...new Set(arr.map(e => e.name))].sort(),
-              entries: arr.map(({ name, body, retracted }) => ({ name, body, retracted })),
+              entries: arr.map(({ name, body, retracted, datetime }) => ({ name, body, retracted, datetime })),
             }))
             .sort((a, b) => (a.price ?? 0) - (b.price ?? 0));
         }
@@ -574,6 +575,21 @@
     el.innerHTML = html;
   }
 
+  // ── Relative time ─────────────────────────────────────────────────────
+  function timeAgo(isoStr) {
+    if (!isoStr) return '';
+    const diffMs = Date.now() - new Date(isoStr).getTime();
+    if (isNaN(diffMs)) return '';
+    const s = Math.floor(diffMs / 1000);
+    if (s < 60)   return `${s}秒前`;
+    const m = Math.floor(s / 60);
+    if (m < 60)   return `${m}分钟前`;
+    const h = Math.floor(m / 60);
+    if (h < 24)   return `${h}小时前`;
+    const d = Math.floor(h / 24);
+    return `${d}天前`;
+  }
+
   // ── Quote popup ───────────────────────────────────────────────────────
   let _popupEl = null;
 
@@ -594,6 +610,7 @@
         <div class="scma-pe-name">
           <span>${escHtml(en.name)}</span>
           ${en.retracted ? '<span class="scma-pe-retract-badge">已撤回</span>' : ''}
+          ${en.datetime ? `<span class="scma-pe-time">${timeAgo(en.datetime)}</span>` : ''}
           <button class="scma-pe-copybtn" data-name="${escHtml(en.name)}">复制名字</button>
         </div>
         <div class="scma-pe-body">${renderMsgBody(en.body)}</div>
@@ -844,6 +861,9 @@
       .scma-pe-retract-badge {
         font-size: 9px; color: #f87171; border: 1px solid #7f1d1d;
         border-radius: 3px; padding: 0 4px; font-weight: normal;
+      }
+      .scma-pe-time {
+        font-size: 9px; color: #64748b; font-weight: normal; margin-left: auto;
       }
       .scma-pe-body {
         color: #94a3b8; white-space: pre-wrap; word-break: break-word;
