@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 航空市场分析器
 // @namespace    simco-aero-market-analyzer
-// @version      1.0
+// @version      1.1
 // @description  实时抓取并解析 SimCompanies 聊天室中 SOR/BFR/JUM/LUX/SEP/SAT 的买卖报价，按产品/等级汇总
 // @author
 // @match        https://www.simcompanies.com/*
@@ -40,7 +40,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION    = '1.0';
+  const VERSION    = '1.1';
   const CHATROOM   = 'X';
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
   const PROD_CODE  = { SOR: 're-91', BFR: 're-94', JUM: 're-95', LUX: 're-96', SEP: 're-97', SAT: 're-99' };
