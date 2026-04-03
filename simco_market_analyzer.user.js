@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 航空市场分析器
 // @namespace    simco-aero-market-analyzer
-// @version      1.1
+// @version      1.2
 // @description  实时抓取并解析 SimCompanies 聊天室中 SOR/BFR/JUM/LUX/SEP/SAT 的买卖报价，按产品/等级汇总
 // @author
 // @match        https://www.simcompanies.com/*
