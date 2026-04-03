@@ -76,6 +76,16 @@
 
       <div id="scma-status">准备就绪</div>
       <div id="scma-results"></div>
+
+      <details id="scma-about">
+        <summary>关于</summary>
+        <div id="scma-about-body">
+          <span>作者：</span>
+          <a href="https://www.simcompanies.com/zh-cn/company/0/LDDL-Corp./" target="_blank" rel="noopener">LDDL Corp.</a>
+          <span class="scma-sep">·</span>
+          <a href="https://github.com/Ldlfylt-LDDL/simco-market-analyzer" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </details>
     `;
     document.body.appendChild(panelEl);
 
@@ -559,6 +569,28 @@
       .scma-price sup {
         font-size: 8px; color: #94a3b8; margin-left: 1px;
       }
+
+      /* ── About ── */
+      #scma-about {
+        border-top: 1px solid #1e293b; flex-shrink: 0;
+      }
+      #scma-about summary {
+        padding: 5px 13px; font-size: 10px; color: #475569;
+        cursor: pointer; list-style: none; user-select: none;
+      }
+      #scma-about summary::-webkit-details-marker { display: none; }
+      #scma-about summary::before { content: '▶ '; font-size: 8px; }
+      #scma-about[open] summary::before { content: '▼ '; }
+      #scma-about summary:hover { color: #94a3b8; }
+      #scma-about-body {
+        padding: 5px 13px 8px; font-size: 11px; color: #64748b;
+        display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+      }
+      #scma-about-body a {
+        color: #7dd3fc; text-decoration: none;
+      }
+      #scma-about-body a:hover { text-decoration: underline; }
+      .scma-sep { color: #334155; }
     `;
     const s = document.createElement('style');
     s.id          = 'scma-styles';
