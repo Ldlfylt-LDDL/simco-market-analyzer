@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         SimCo 航空市场分析器
-// @namespace    simco-aero-market-analyzer
-// @version      1.11
-// @description  实时抓取并解析 SimCompanies 聊天室中 SOR/BFR/JUM/LUX/SEP/SAT 的买卖报价，按产品/等级汇总
+// @name         SimCo 市场报价分析器
+// @namespace    simco-market-quote-analyzer
+// @version      1.2
+// @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
 // @grant        GM_xmlhttpRequest
@@ -40,7 +40,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.11';
+  const VERSION        = '1.2';
   const CHATROOM       = 'X';
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
@@ -56,14 +56,18 @@
     injectToggleButton();
   }
 
-  // ── Toggle button (bottom-right corner) ──────────────────────────────
+  // ── Toggle buttons (bottom-right corner) ─────────────────────────────
   function injectToggleButton() {
-    const btn = document.createElement('button');
-    btn.id        = 'scma-toggle';
-    btn.innerHTML = '✈ 市场';
-    btn.title     = 'SimCo 航空市场分析器';
-    btn.onclick   = () => panelEl ? destroyPanel() : createPanel();
-    document.body.appendChild(btn);
+    const wrap = document.createElement('div');
+    wrap.id = 'scma-toggle-wrap';
+    const b1 = document.createElement('button');
+    b1.id = 'scma-toggle-aero'; b1.innerHTML = '✈';
+    b1.onclick = () => panelEl ? destroyPanel() : createPanel();
+    const b2 = document.createElement('button');
+    b2.id = 'scma-toggle-mkt'; b2.innerHTML = '🌐';
+    b2.onclick = () => mktPanelEl ? destroyMktPanel() : createMktPanel();
+    wrap.appendChild(b1); wrap.appendChild(b2);
+    document.body.appendChild(wrap);
   }
 
   // ── Panel ─────────────────────────────────────────────────────────────
@@ -82,7 +86,7 @@
 
       <div id="scma-controls">
         <label title="向前搜索几小时的消息">
-          时 <input id="scma-hours" type="number" value="8" min="1" max="48">
+          时 <input id="scma-hours" type="number" value="4" min="1" max="12">
         </label>
         <button id="scma-search">🔍 搜索</button>
         <button id="scma-stop" disabled>⏹</button>
@@ -96,7 +100,10 @@
         <div id="scma-about-body">
           <span>作者：</span>
           <a href="https://www.simcompanies.com/zh-cn/company/0/LDDL-Corp./" target="_blank" rel="noopener">LDDL Corp.</a>
-          <span class="scma-sep">·</span>
+          <span class="scma-sep">(作者也是新手，有错误请多多指教)</span>
+        </div>
+        <div id="scma-about-body">
+          <span>源码：</span>
           <a href="https://github.com/Ldlfylt-LDDL/simco-market-analyzer" target="_blank" rel="noopener">GitHub</a>
         </div>
         <div id="scma-about-ver">
@@ -130,11 +137,13 @@
       renderResults(panelEl.querySelector('#scma-results'), _lastSummary, _lastQuotes, _lastMsgs);
       panelEl.querySelector('#scma-status').textContent = _lastStatus;
     }
+    updatePanelPositions();
   }
 
   function destroyPanel() {
     stopSearch();
     if (panelEl) { panelEl.remove(); panelEl = null; }
+    updatePanelPositions();
   }
 
   // ── Drag support ──────────────────────────────────────────────────────
@@ -486,7 +495,7 @@
       // deduplicate by company+body
       const sig = q.company + '\x00' + (q.body || '');
       if (!tree[prod][qual][dir][key].some(e => e.sig === sig))
-        tree[prod][qual][dir][key].push({ name: q.company, body: q.body || '', retracted: !!q.retracted, datetime: q.datetime || null, sig });
+        tree[prod][qual][dir][key].push({ name: q.company, body: q.body || '', retracted: !!q.retracted, datetime: q.datetime || null, direction: dir, sig });
     }
     const result = {};
     for (const [prod, quals] of Object.entries(tree)) {
@@ -504,7 +513,7 @@
               price: p === 'no_price' ? null : parseInt(p),
               count: arr.length,
               companies: [...new Set(arr.map(e => e.name))].sort(),
-              entries: arr.map(({ name, body, retracted, datetime }) => ({ name, body, retracted, datetime })),
+              entries: arr.map(({ name, body, retracted, datetime, direction }) => ({ name, body, retracted, datetime, direction })),
             }))
             .sort((a, b) => (a.price ?? 0) - (b.price ?? 0));
         }
@@ -607,27 +616,23 @@
       document.addEventListener('keydown', ev => { if (ev.key === 'Escape') hideQuotePopup(); });
     }
 
-    const rows = entries.map(en => `
+    const rows = entries.map(en => {
+      const coUrl = `https://www.simcompanies.com/zh-cn/company/0/${encodeURIComponent(en.name)}/`;
+      const dirBadge = en.direction === 'buy'
+        ? '<span class="scma-dir-buy">BUY</span>'
+        : en.direction === 'sell' ? '<span class="scma-dir-sell">SELL</span>' : '';
+      return `
       <div class="scma-pe${en.retracted ? ' scma-pe--retracted' : ''}">
         <div class="scma-pe-name">
-          <span>${escHtml(en.name)}</span>
+          ${dirBadge}
+          <a class="scma-co-link" href="${escHtml(coUrl)}" target="_blank" rel="noopener">${escHtml(en.name)}</a>
           ${en.retracted ? '<span class="scma-pe-retract-badge">已撤回</span>' : ''}
           ${en.datetime ? `<span class="scma-pe-time">${timeAgo(en.datetime)}</span>` : ''}
-          <button class="scma-pe-copybtn" data-name="${escHtml(en.name)}">复制名字</button>
         </div>
         <div class="scma-pe-body">${renderMsgBody(en.body)}</div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     _popupEl.innerHTML = rows;
-
-    _popupEl.querySelectorAll('.scma-pe-copybtn').forEach(btn => {
-      btn.addEventListener('click', ev => {
-        ev.stopPropagation();
-        navigator.clipboard.writeText(btn.dataset.name).catch(() => {});
-        btn.textContent = '✓ 已复制';
-        btn.classList.add('scma-pe-copybtn--done');
-        setTimeout(() => { btn.textContent = '复制名字'; btn.classList.remove('scma-pe-copybtn--done'); }, 1500);
-      });
-    });
 
     // Position near click, keep within viewport
     const pw = 320, ph = 240;
@@ -647,18 +652,21 @@
 
   function renderMsgBody(text) {
     let html = escHtml(text);
-    for (const [code, url] of Object.entries(PROD_IMG)) {
-      const name = PRODUCT_CODES[code];
-      html = html.replaceAll(code, `<img src="${url}" class="scma-prod-icon" title="${name}" alt="${name}">`);
-    }
+    html = html.replace(/:re-(\d+):/g, (_, idStr) => {
+      const id  = parseInt(idStr);
+      const en  = MKT_BY_ID[id] || PRODUCT_CODES[`:re-${idStr}:`] || `re-${idStr}`;
+      const zh  = MKT_ZH[id] || '';
+      const label = zh ? `${en} ${zh}` : en;
+      return `<span class="scma-mkt-re" title="re-${idStr}">${escHtml(label)}</span>`;
+    });
     return html;
   }
 
   // ── Update check ─────────────────────────────────────────────────────
-  function checkForUpdates() {
+  function checkForUpdates(statusEl) {
+    if (!statusEl) statusEl = panelEl && panelEl.querySelector('#scma-update-status');
     const RAW_URL  = 'https://raw.githubusercontent.com/Ldlfylt-LDDL/simco-market-analyzer/main/simco_market_analyzer.user.js';
     const DL_URL   = 'https://github.com/Ldlfylt-LDDL/simco-market-analyzer/raw/main/simco_market_analyzer.user.js';
-    const statusEl = panelEl && panelEl.querySelector('#scma-update-status');
     if (statusEl) statusEl.textContent = '检查中…';
 
     GM_xmlhttpRequest({
@@ -691,12 +699,12 @@
     el.innerHTML = `
       <div id="scma-help-box">
         <div id="scma-help-header">
-          <span>使用说明</span>
+          <span>航天市场分析器 — 使用说明</span>
           <button id="scma-help-close">✕</button>
         </div>
         <div id="scma-help-body">
           <h3>基本使用</h3>
-          <p>点击右下角 <b>✈ 市场</b> 按钮打开面板。在<b>时</b>输入框中填写想往前追溯的小时数（默认 8 小时），点击 <b>🔍 搜索</b> 开始抓取聊天室 X 中的消息。</p>
+          <p>点击右下角 <b>✈</b> 按钮打开面板。在<b>时</b>输入框中填写想往前追溯的小时数（范围1到12小时，默认 4 小时），点击 <b>🔍 搜索</b> 开始抓取聊天室 X 中的消息。</p>
 
           <h3>结果表格</h3>
           <p>结果按产品（SOR / BFR / JUM / LUX / SEP / SAT）分组，每个产品显示一张买卖汇总表：</p>
@@ -737,19 +745,624 @@
     document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && el.style.display !== 'none') el.style.display = 'none'; });
   }
 
+  // ── Market help popup ────────────────────────────────────────────────
+  function showMktHelpPopup() {
+    let el = document.getElementById('scma-mkt-help-overlay');
+    if (el) { el.style.display = 'flex'; return; }
+
+    el = document.createElement('div');
+    el.id = 'scma-mkt-help-overlay';
+    el.innerHTML = `
+      <div id="scma-help-box">
+        <div id="scma-help-header">
+          <span>全市场报价 — 使用说明</span>
+          <button id="scma-mkt-help-close">✕</button>
+        </div>
+        <div id="scma-help-body">
+          <h3>基本使用</h3>
+          <p>点击右下角 <b>🌐</b> 按钮打开面板。在<b>时</b>输入框填写追溯小时数（范围1~8小时，默认 2 小时，请不要把时间设置太长，以免滥用api），在<b>聊天室</b>选择框选择对应聊天室，点击 <b>🔍 搜索</b> 开始抓取。</p>
+
+          <h3>关注列表</h3>
+          <p>搜索前须先添加关注物品：</p>
+          <ul>
+            <li>从下拉菜单选择物品（显示英文 / 中文），点击 <b>+ 关注</b> 加入列表。</li>
+            <li>每个物品可点击 <b>Q0–Q9</b> 标签过滤等级；<b>任意</b> 表示不限等级。</li>
+            <li>点击 <b>✕</b> 移除关注。关注列表自动持久化保存，刷新页面后仍然有效。</li>
+          </ul>
+
+          <h3>结果 — 汇总表</h3>
+          <p>搜索完成后，每个关注物品显示一张买卖汇总表：</p>
+          <ul>
+            <li><b>等级</b> 列显示 Q0–Q9；<span class="scma-help-tag buy">BUY</span> 为求购，<span class="scma-help-tag sell">SELL</span> 为出售。</li>
+            <li>每个价格标签旁的 <b>×N</b> 表示有 N 条消息报出此价格，可点击查看原始消息弹窗。</li>
+            <li>价格格式：直接价（如 <b>34.5k</b>）、市场价百分比（如 <b>MP-3%</b>）、市场价差值（如 <b>MP-100</b>）。</li>
+            <li><span style="text-decoration:line-through;opacity:.6">划线价格</span> 表示对应消息已被撤回。</li>
+            <li>? 表示未提及价格</li>
+          </ul>
+
+          <h3>结果 — 原始消息</h3>
+          <p>点击顶部 <b>原始消息</b> 标签，按时间从近到远罗列所有匹配消息：</p>
+          <ul>
+            <li>公司名（绿色）可点击直达玩家主页。</li>
+            <li>消息中的产品代码自动替换为图标（若图标不可用则显示文字名称）。</li>
+            <li>显示发送时间（如 <i>3分钟前</i>）。</li>
+          </ul>
+
+          <h3>价格识别范围</h3>
+          <p>支持识别消息中的 <b>:re-N:</b> 产品代码（仅限关注的物品）。识别的价格格式：</p>
+          <ul>
+            <li>直接报价：<b>@34.5k</b>、<b>at 34.5k</b>、<b>$34.5k</b></li>
+            <li>市场价百分比：<b>mp-3%</b>、<b>-3% market</b>、<b>3% below mp</b></li>
+            <li>市场价差值：<b>mp-100</b>、<b>-100 mp</b>、<b>100 below market</b></li>
+          </ul>
+          <p>格式特殊的报价（价格写在下一行、使用非常规符号等）<b>可能无法识别</b>，结果仅供参考。</p>
+
+          <h3>其他</h3>
+          <ul>
+            <li>搜索结束后关闭面板再重新打开，上一次结果会自动保留。</li>
+            <li>面板可拖动，抓住顶部标题栏即可移动。</li>
+            <li>展开底部「关于」可检查是否有新版本。</li>
+          </ul>
+        </div>
+      </div>`;
+    document.body.appendChild(el);
+
+    el.querySelector('#scma-mkt-help-close').onclick = () => { el.style.display = 'none'; };
+    el.addEventListener('click', ev => { if (ev.target === el) el.style.display = 'none'; });
+    document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && el.style.display !== 'none') el.style.display = 'none'; });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ── SECTION 2: All-market quote search ────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════
+
+  // ── All products (sorted alphabetically) ─────────────────────────────
+  const MKT_PRODUCTS = [
+    {id:3,n:'Apples'},{id:123,n:'Apple Cider'},{id:123,n:'Apple Pie'},{id:82,n:'Attitude Control'},
+    {id:15,n:'Bauxite'},{id:22,n:'Batteries'},{id:94,n:'BFR'},{id:121,n:'Bread'},{id:102,n:'Bricks'},
+    {id:134,n:'Butter'},{id:112,n:'Bulldozer'},{id:75,n:'Carbon Fibers'},{id:76,n:'Carbon Composite'},
+    {id:104,n:'Clay'},{id:140,n:'Chocolate'},{id:119,n:'Coffee Powder'},{id:118,n:'Coffee Beans'},
+    {id:132,n:'Cocktails'},{id:103,n:'Cement'},{id:122,n:'Cheese'},{id:17,n:'Chemicals'},
+    {id:81,n:'Cockpit'},{id:52,n:'Combustion Engine'},{id:111,n:'Construction Units'},
+    {id:40,n:'Cotton'},{id:115,n:'Cows'},{id:10,n:'Crude Oil'},{id:23,n:'Displays'},
+    {id:12,n:'Diesel'},{id:62,n:'Dress'},{id:137,n:'Dough'},{id:48,n:'Electric Motor'},
+    {id:21,n:'Electronic Comps'},{id:9,n:'Eggs'},{id:73,n:'Ethanol'},{id:41,n:'Fabric'},
+    {id:80,n:'Flight Computer'},{id:139,n:'Fodder'},{id:133,n:'Flour'},{id:127,n:'Frozen Pizza'},
+    {id:77,n:'Fuselage'},{id:126,n:'Ginger Beer'},{id:45,n:'Glass'},{id:68,n:'Gold Ore'},
+    {id:69,n:'Golden Bars'},{id:6,n:'Grain'},{id:64,n:'Handbags'},{id:87,n:'Heat Shield'},
+    {id:79,n:'High Grade E-Comps'},{id:129,n:'Hamburger'},{id:88,n:'Ion Drive'},
+    {id:89,n:'Jet Engine'},{id:95,n:'Jumbo Jet'},{id:26,n:'Laptops'},{id:130,n:'Lasagna'},
+    {id:46,n:'Leather'},{id:105,n:'Limestone'},{id:96,n:'Luxury Jet'},{id:56,n:'Luxury Car'},
+    {id:54,n:'Luxury E-Car'},{id:49,n:'Luxury Interior'},{id:70,n:'Luxury Watch'},
+    {id:131,n:'Meat Balls'},{id:74,n:'Methane'},{id:14,n:'Minerals'},{id:117,n:'Milk'},
+    {id:27,n:'Monitors'},{id:71,n:'Necklace'},{id:47,n:'On-board Computer'},
+    {id:92,n:'Orbital Booster'},{id:4,n:'Oranges'},{id:124,n:'Orange Juice'},
+    {id:128,n:'Pasta'},{id:11,n:'Petrol'},{id:116,n:'Pigs'},{id:108,n:'Planks'},
+    {id:19,n:'Plastic'},{id:84,n:'Propellant Tank'},{id:1,n:'Power'},{id:20,n:'Processors'},
+    {id:98,n:'Quadcopter'},{id:101,n:'Reinforced Concrete'},{id:114,n:'Robots'},
+    {id:86,n:'Rocket Engine'},{id:83,n:'Rocket Fuel'},{id:142,n:'Salad'},{id:143,n:'Samosa'},
+    {id:99,n:'Satellite'},{id:138,n:'Sauce'},{id:8,n:'Sausages'},{id:66,n:'Seeds'},
+    {id:16,n:'Silicon'},{id:97,n:'Single Engine Plane'},{id:65,n:'Sneakers'},
+    {id:35,n:'Software'},{id:85,n:'Solid Fuel Booster'},{id:43,n:'Steel'},
+    {id:107,n:'Steel Beams'},{id:7,n:'Steak'},{id:93,n:'Starship'},{id:63,n:'Stiletto Heel'},
+    {id:90,n:'Sub-orbital 2nd Stage'},{id:91,n:'Sub-orbital Rocket'},{id:135,n:'Sugar'},
+    {id:72,n:'Sugarcane'},{id:28,n:'Televisions'},{id:25,n:'Tablets'},{id:110,n:'Tools'},
+    {id:13,n:'Transport'},{id:57,n:'Truck'},{id:141,n:'Veg Oil'},{id:120,n:'Vegetables'},
+    {id:2,n:'Water'},{id:78,n:'Wing'},{id:109,n:'Windows'},{id:106,n:'Wood'},
+    {id:44,n:'Sand'},{id:24,n:'Smartphones'},{id:53,n:'Economy E-Car'},{id:55,n:'Economy Car'},
+    {id:18,n:'Aluminium'},{id:42,n:'Iron Ore'},{id:51,n:'Car Body'},
+    {id:60,n:'Underwear'},{id:61,n:'Gloves'},{id:125,n:'Apple Cider'},
+    {id:29,n:'Crop Research'},{id:30,n:'Energy Research'},{id:31,n:'Mining Research'},
+    {id:32,n:'Electronics Research'},{id:33,n:'Livestock Research'},{id:34,n:'Chemical Research'},
+    {id:59,n:'Fashion Research'},{id:100,n:'Aerospace Research'},{id:113,n:'Materials Research'},
+    {id:145,n:'Recipe'},{id:151,n:'Easter Bunny'},{id:155,n:'Creamy Eggs'},
+  ].filter((p,i,a) => a.findIndex(x=>x.id===p.id)===i)
+   .sort((a,b) => a.n.localeCompare(b.n));
+
+  const MKT_BY_ID = {};
+  MKT_PRODUCTS.forEach(p => MKT_BY_ID[p.id] = p.n);
+
+  const MKT_ZH = {
+    1:'电力',2:'水',3:'苹果',4:'橙子',5:'葡萄',6:'谷物',7:'牛排',8:'香肠',9:'鸡蛋',10:'原油',
+    11:'汽油',12:'柴油',13:'运输',14:'矿石',15:'铝土矿',16:'硅',17:'化学品',18:'铝',19:'塑料',20:'处理器',
+    21:'电子元件',22:'电池',23:'显示屏',24:'智能手机',25:'平板电脑',26:'笔记本电脑',27:'显示器',28:'电视',
+    35:'软件',40:'棉花',41:'织物',42:'铁矿石',43:'钢铁',44:'沙子',45:'玻璃',46:'皮革',
+    47:'车载电脑',48:'电动机',49:'豪华内饰',50:'基础内饰',51:'车身',52:'内燃机',
+    53:'经济型电动车',54:'豪华电动车',55:'经济型汽车',56:'豪华汽车',57:'卡车',
+    60:'内衣',61:'手套',62:'连衣裙',63:'细跟高跟鞋',64:'手提包',65:'运动鞋',
+    66:'种子',68:'金矿石',69:'金条',70:'奢华手表',71:'项链',72:'甘蔗',73:'乙醇',74:'甲烷',
+    75:'碳纤维',76:'碳复合材料',77:'机身',78:'机翼',79:'高级电子元件',80:'飞行电脑',
+    81:'驾驶舱',82:'姿态控制系统',83:'火箭燃料',84:'推进剂罐',85:'固体燃料助推器',
+    86:'火箭发动机',87:'隔热板',88:'离子驱动',89:'喷气发动机',90:'亚轨道二级',
+    91:'亚轨道火箭',92:'轨道助推器',93:'星舰',94:'超重型火箭',95:'巨型客机',
+    96:'豪华私人飞机',97:'单引擎飞机',98:'四旋翼无人机',99:'卫星',
+    101:'钢筋混凝土',102:'砖块',103:'水泥',104:'黏土',105:'石灰石',106:'木材',
+    107:'钢梁',108:'木板',109:'玻璃窗',110:'工具',111:'建筑单元',112:'推土机',
+    114:'机器人',115:'奶牛',116:'猪',117:'牛奶',118:'咖啡豆',119:'咖啡粉',120:'蔬菜',
+    121:'面包',122:'奶酪',123:'苹果派',124:'橙汁',125:'苹果酒',126:'姜汁啤酒',
+    127:'冷冻披萨',128:'意大利面',129:'汉堡',130:'千层面',131:'肉丸',132:'鸡尾酒',
+    133:'面粉',134:'黄油',135:'糖',136:'可可',137:'面团',138:'酱料',
+    139:'饲料',140:'巧克力',141:'植物油',142:'沙拉',143:'炸三角',
+    29:'作物研究',30:'能源研究',31:'采矿研究',32:'电器研究',33:'畜牧研究',34:'化学研究',
+    59:'时装研究',100:'航空航天研究',113:'材料研究',145:'食谱',151:'复活节兔兔',155:'奶油鸡蛋',
+  };
+
+  // ── Image cache ───────────────────────────────────────────────────────
+  const mktImgCache = {};  // id → URL
+  let   mktImgsLoaded = false;
+  async function initMktImages() {
+    if (mktImgsLoaded) return;
+    // Seed known aerospace images
+    for (const [code, url] of Object.entries(PROD_IMG)) {
+      const m = code.match(/:re-(\d+):/);
+      if (m) mktImgCache[parseInt(m[1])] = url;
+    }
+    // Try collection endpoint
+    try {
+      const resp = await fetch('/api/v4/en/0/encyclopedia/resources/0/', { credentials: 'include' });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data)) {
+          for (const r of data) { if (r.id != null && r.image) mktImgCache[r.id] = r.image; }
+        }
+      }
+    } catch {}
+    mktImgsLoaded = true;
+  }
+
+  // ── Panel positioning ─────────────────────────────────────────────────
+  function updatePanelPositions() {
+    const AERO_W = 430, GAP = 10, BASE = 18;
+    if (panelEl)    panelEl.style.right = BASE + 'px';
+    if (mktPanelEl) mktPanelEl.style.right = (panelEl ? AERO_W + GAP + BASE : BASE) + 'px';
+  }
+
+  // ── Watchlist persistence ─────────────────────────────────────────────
+  const MKT_LS_KEY = 'scma_watchlist_v1';
+  let mktWatchlist = [];
+  function loadWatchlist() {
+    try { mktWatchlist = JSON.parse(localStorage.getItem(MKT_LS_KEY)) || []; }
+    catch { mktWatchlist = []; }
+  }
+  function saveWatchlist() { localStorage.setItem(MKT_LS_KEY, JSON.stringify(mktWatchlist)); }
+  loadWatchlist();
+
+  // ── Market panel state ────────────────────────────────────────────────
+  let mktPanelEl    = null;
+  let mktAbortCtrl2 = null;
+  let mktLastQuotes2 = [];
+  let mktLastMsgs2   = 0;
+  let mktLastStatus2 = null;
+  let mktViewMode   = 'table';
+
+  // ── Create market panel ───────────────────────────────────────────────
+  function createMktPanel() {
+    mktPanelEl = document.createElement('div');
+    mktPanelEl.id = 'scma-mkt-panel';
+    mktPanelEl.innerHTML = `
+      <div id="scma-mkt-header">
+        <span>🌐 全市场报价</span>
+        <div style="display:flex;gap:6px;align-items:center">
+          <button id="scma-mkt-help" title="使用帮助">?</button>
+          <button id="scma-mkt-close">✕</button>
+        </div>
+      </div>
+      <div id="scma-mkt-controls">
+        <label>时 <input id="scma-mkt-hours" type="number" value="2" min="1" max="8"></label>
+        <label>聊天室 <select id="scma-mkt-room">
+          <option value="S">Sales</option>
+          <option value="X">Aerospace sales</option>
+        </select></label>
+        <button id="scma-mkt-search">🔍 搜索</button>
+        <button id="scma-mkt-stop" disabled>⏹</button>
+      </div>
+      <div id="scma-mkt-wl">
+        <div id="scma-mkt-wl-add">
+          <select id="scma-mkt-wl-sel">
+            ${MKT_PRODUCTS.map(p=>`<option value="${p.id}">${escHtml(p.n)}${MKT_ZH[p.id] ? ' / ' + MKT_ZH[p.id] : ''}</option>`).join('')}
+          </select>
+          <button id="scma-mkt-wl-addbtn">+ 关注</button>
+        </div>
+        <div id="scma-mkt-wl-list"></div>
+      </div>
+      <div id="scma-mkt-view">
+        <button class="scma-mkt-vtab scma-mkt-vtab--on" data-mode="table">汇总表</button>
+        <button class="scma-mkt-vtab" data-mode="messages">原始消息</button>
+      </div>
+      <div id="scma-mkt-status">准备就绪</div>
+      <div id="scma-mkt-results"></div>
+      <details id="scma-mkt-about">
+        <summary>关于</summary>
+        <div id="scma-about-body">
+          <span>作者：</span>
+          <a href="https://www.simcompanies.com/zh-cn/company/0/LDDL-Corp./" target="_blank" rel="noopener">LDDL Corp.</a>
+          <span class="scma-sep">(作者也是新手，有错误请多多指教)</span>
+        </div>
+        <div id="scma-about-body">
+          <span>源码：</span>
+          <a href="https://github.com/Ldlfylt-LDDL/simco-market-analyzer" target="_blank" rel="noopener">GitHub</a>
+        </div>
+        <div id="scma-mkt-about-ver">
+          <span>v${VERSION}</span>
+          <span class="scma-sep">·</span>
+          <a id="scma-mkt-update-btn" href="#">检查更新</a>
+          <span id="scma-mkt-update-status"></span>
+        </div>
+      </details>
+    `;
+    document.body.appendChild(mktPanelEl);
+
+    mktPanelEl.querySelector('#scma-mkt-close').onclick = destroyMktPanel;
+    mktPanelEl.querySelector('#scma-mkt-help').onclick  = showMktHelpPopup;
+    mktPanelEl.querySelector('#scma-mkt-update-btn').onclick = e => { e.preventDefault(); checkForUpdates(mktPanelEl.querySelector('#scma-mkt-update-status')); };
+    mktPanelEl.querySelector('#scma-mkt-search').onclick = startMktSearch;
+    mktPanelEl.querySelector('#scma-mkt-stop').onclick = () => {
+      if (mktAbortCtrl2) { mktAbortCtrl2.abort(); mktAbortCtrl2 = null; }
+    };
+    initMktImages();
+
+    mktPanelEl.querySelector('#scma-mkt-wl-addbtn').onclick = () => {
+      const id = parseInt(mktPanelEl.querySelector('#scma-mkt-wl-sel').value);
+      if (id && !mktWatchlist.some(w => w.id === id)) {
+        mktWatchlist.push({ id, qualities: null });
+        saveWatchlist(); renderWatchlist();
+      }
+    };
+    mktPanelEl.querySelectorAll('.scma-mkt-vtab').forEach(btn => {
+      btn.onclick = () => {
+        mktViewMode = btn.dataset.mode;
+        mktPanelEl.querySelectorAll('.scma-mkt-vtab').forEach(b => b.classList.remove('scma-mkt-vtab--on'));
+        btn.classList.add('scma-mkt-vtab--on');
+        if (mktLastQuotes2.length)
+          renderMktResults(mktPanelEl.querySelector('#scma-mkt-results'), mktLastQuotes2, mktViewMode);
+      };
+    });
+
+    mktPanelEl.querySelector('#scma-mkt-results').addEventListener('click', e => {
+      const span = e.target.closest('[data-ci]');
+      if (!span) return;
+      const entries = _ciMap.get(parseInt(span.dataset.ci));
+      if (entries) showQuotePopup(e.clientX, e.clientY, entries);
+    });
+
+    makeDraggable(mktPanelEl, mktPanelEl.querySelector('#scma-mkt-header'));
+    renderWatchlist();
+    if (mktLastQuotes2.length) {
+      renderMktResults(mktPanelEl.querySelector('#scma-mkt-results'), mktLastQuotes2, mktViewMode);
+      if (mktLastStatus2) mktPanelEl.querySelector('#scma-mkt-status').textContent = mktLastStatus2;
+    }
+    updatePanelPositions();
+  }
+
+  function destroyMktPanel() {
+    if (mktAbortCtrl2) { mktAbortCtrl2.abort(); mktAbortCtrl2 = null; }
+    if (mktPanelEl) { mktPanelEl.remove(); mktPanelEl = null; }
+    updatePanelPositions();
+  }
+
+  // ── Watchlist UI ──────────────────────────────────────────────────────
+  function renderWatchlist() {
+    if (!mktPanelEl) return;
+    const el = mktPanelEl.querySelector('#scma-mkt-wl-list');
+    if (!mktWatchlist.length) { el.innerHTML = '<div class="scma-wl-empty">暂无关注物品</div>'; return; }
+    el.innerHTML = mktWatchlist.map(w => {
+      const name = MKT_BY_ID[w.id] || `ID:${w.id}`;
+      const anyOn = !w.qualities || !w.qualities.length;
+      const qSpans = [0,1,2,3,4,5,6,7,8,9].map(q =>
+        `<span class="scma-wl-q${(!anyOn && w.qualities.includes(q)) ? ' scma-wl-q--on' : ''}" data-wid="${w.id}" data-q="${q}">Q${q}</span>`
+      ).join('');
+      return `<div class="scma-wl-item">
+        <span class="scma-wl-name">${escHtml(name)}</span>
+        <div class="scma-wl-quals">
+          <span class="scma-wl-q${anyOn ? ' scma-wl-q--on' : ''}" data-wid="${w.id}" data-q="any">任意</span>
+          ${qSpans}
+        </div>
+        <button class="scma-wl-rm" data-wid="${w.id}">✕</button>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('.scma-wl-q').forEach(s => {
+      s.onclick = () => {
+        const id = parseInt(s.dataset.wid), q = s.dataset.q;
+        const w = mktWatchlist.find(x => x.id === id);
+        if (!w) return;
+        if (q === 'any') { w.qualities = null; }
+        else {
+          const qn = parseInt(q);
+          if (!w.qualities) w.qualities = [];
+          const i = w.qualities.indexOf(qn);
+          if (i >= 0) w.qualities.splice(i, 1); else w.qualities.push(qn);
+          if (!w.qualities.length) w.qualities = null;
+        }
+        saveWatchlist(); renderWatchlist();
+      };
+    });
+    el.querySelectorAll('.scma-wl-rm').forEach(btn => {
+      btn.onclick = () => {
+        mktWatchlist = mktWatchlist.filter(x => x.id !== parseInt(btn.dataset.wid));
+        saveWatchlist(); renderWatchlist();
+      };
+    });
+  }
+
+  // ── Market search ─────────────────────────────────────────────────────
+  async function startMktSearch() {
+    if (!mktWatchlist.length) {
+      mktPanelEl.querySelector('#scma-mkt-status').textContent = '请先添加关注物品';
+      return;
+    }
+    const hours    = parseFloat(mktPanelEl.querySelector('#scma-mkt-hours').value) || 8;
+    const room     = mktPanelEl.querySelector('#scma-mkt-room').value || 'S';
+    const cutoff   = Date.now() - hours * 3600 * 1000;
+    const statusEl = mktPanelEl.querySelector('#scma-mkt-status');
+    const resultsEl= mktPanelEl.querySelector('#scma-mkt-results');
+    const btnSearch= mktPanelEl.querySelector('#scma-mkt-search');
+    const btnStop  = mktPanelEl.querySelector('#scma-mkt-stop');
+
+    btnSearch.disabled = true; btnStop.disabled = false;
+    resultsEl.innerHTML = ''; mktLastQuotes2 = [];
+
+    mktAbortCtrl2 = new AbortController();
+    const { signal } = mktAbortCtrl2;
+    const BASE = `https://www.simcompanies.com/api/v2/chatroom/${encodeURIComponent(room)}/`;
+    let url = BASE, page = 0, done = false;
+    const allMsgs = [];
+    const watchedIds = new Set(mktWatchlist.map(w => w.id));
+
+    try {
+      while (!done) {
+        if (signal.aborted) break;
+        statusEl.textContent = `⏳ 第 ${++page} 页 (已收集 ${allMsgs.length} 条)…`;
+        const resp = await fetch(url, { credentials: 'include', signal });
+        if (!resp.ok) throw new Error(`API ${resp.status}，请确认聊天室代码`);
+        const data = await resp.json();
+        if (!Array.isArray(data) || !data.length) break;
+        let minId = Infinity;
+        for (const msg of data) {
+          if (msg.id < minId) minId = msg.id;
+          if (new Date(msg.datetime).getTime() < cutoff) { done = true; continue; }
+          allMsgs.push(msg);
+        }
+        url = `${BASE}from-id/${minId}/`;
+        if (page >= 50) break;
+        if (!done) await new Promise(r => setTimeout(r, PAGE_DELAY_MS));
+      }
+      statusEl.textContent = `🔄 解析 ${allMsgs.length} 条消息…`;
+      const quotes = allMsgs.flatMap(msg => parseMktMessage(msg, watchedIds));
+      mktLastQuotes2 = quotes;
+      mktLastMsgs2   = allMsgs.length;
+      mktLastStatus2 = `✅ ${allMsgs.length} 条消息 · ${quotes.length} 条相关报价 · 最近 ${hours}h (聊天室 ${room})`;
+      statusEl.textContent = mktLastStatus2;
+      renderMktResults(resultsEl, quotes, mktViewMode);
+    } catch(e) {
+      if (e.name !== 'AbortError') { statusEl.textContent = `❌ ${e.message}`; console.error('[SCMA-MKT]', e); }
+      else statusEl.textContent = '⏹ 已停止';
+    }
+    btnSearch.disabled = false; btnStop.disabled = true;
+  }
+
+  // ── Market message parsing ────────────────────────────────────────────
+  function parseMktMessage(msg, watchedIds) {
+    const company   = msg.sender?.company || '?';
+    const text      = msg.body || '';
+    const datetime  = msg.datetime || null;
+    const retracted = !!msg.retracted;
+    const results   = [];
+    const lines     = text.split('\n').map(l => l.trim()).filter(l => l);
+    let curDir = null;
+
+    for (const line of lines) {
+      if (RENT_RE.test(line)) continue;
+      const lineDir = detectDir(line);
+      if (lineDir) curDir = lineDir;
+      const dir = lineDir || curDir;
+      if (!dir) continue;
+
+      // Find :re-N: codes for watched products on this line
+      const codeRe = /:re-(\d+):/g;
+      let m;
+      const mentions = [];
+      while ((m = codeRe.exec(line)) !== null) {
+        const id = parseInt(m[1]);
+        if (watchedIds.has(id)) mentions.push({ id, start: m.index, end: m.index + m[0].length });
+      }
+      if (!mentions.length) continue;
+
+      for (const mention of mentions) {
+        const w = mktWatchlist.find(x => x.id === mention.id);
+        const pre  = line.slice(0, mention.start);
+        const post = line.slice(mention.end);
+        const dirBoundary = post.search(/\b(sell(?:ing)?|buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|offer(?:ing)?)\b/i);
+        const safePost = dirBoundary > 0 ? post.slice(0, dirBoundary) : post;
+        const quals = extractQualities(pre + ' ' + safePost);
+        const price = extractMktPrice(pre + ' ' + safePost);
+
+        const qualList = quals.length ? quals : [null];
+        for (const q of qualList) {
+          // Apply quality filter
+          if (w && w.qualities && w.qualities.length && q !== null && !w.qualities.includes(parseInt(q.slice(1)))) continue;
+          results.push({
+            company, direction: dir,
+            productId: mention.id,
+            productName: MKT_BY_ID[mention.id] || `ID:${mention.id}`,
+            quality: q, price,
+            body: text, datetime, retracted,
+          });
+        }
+      }
+    }
+    return results;
+  }
+
+  // ── Market price extraction ───────────────────────────────────────────
+  function extractMktPrice(text) {
+    const t = text.replace(/(\d),(\d)/g, '$1.$2');
+    let m;
+
+    // MP percentage: mp-3%, -3%mp, -4% market, 4% below mp, market-3%
+    m = /(?:mp|market)\s*-\s*(\d+(?:\.\d+)?)\s*%/i.exec(t);
+    if (m) return { type: 'mp_pct', val: -parseFloat(m[1]) };
+    m = /-\s*(\d+(?:\.\d+)?)\s*%\s*(?:mp|market)/i.exec(t);
+    if (m) return { type: 'mp_pct', val: -parseFloat(m[1]) };
+    m = /\+\s*(\d+(?:\.\d+)?)\s*%\s*(?:mp|market)/i.exec(t);
+    if (m) return { type: 'mp_pct', val: +parseFloat(m[1]) };
+    m = /(\d+(?:\.\d+)?)\s*%\s*below\s*(?:mp|market)/i.exec(t);
+    if (m) return { type: 'mp_pct', val: -parseFloat(m[1]) };
+    m = /(\d+(?:\.\d+)?)\s*%\s*above\s*(?:mp|market)/i.exec(t);
+    if (m) return { type: 'mp_pct', val: +parseFloat(m[1]) };
+
+    // MP absolute: mp-100, -100 mp, N below mp
+    m = /(?:mp|market)\s*-\s*(\d+(?:\.\d+)?)\s*([kK])?(?!\s*%)/i.exec(t);
+    if (m) return { type: 'mp_abs', val: -(parseFloat(m[1]) * (m[2] ? 1000 : 1)) };
+    m = /-\s*(\d+(?:\.\d+)?)\s*([kK])?\s*(?:mp|market)(?!\s*%)/i.exec(t);
+    if (m) return { type: 'mp_abs', val: -(parseFloat(m[1]) * (m[2] ? 1000 : 1)) };
+    m = /(\d+(?:\.\d+)?)\s*(?:below|under)\s*(?:mp|market)/i.exec(t);
+    if (m) return { type: 'mp_abs', val: -parseFloat(m[1]) };
+
+    // Direct price: @2750, $0.405, at 0.395, bare trailing number
+    m = /[@$]\s*\$?\s*(\d+(?:\.\d+)?)\s*([kK])?/.exec(t);
+    if (m) return { type: 'direct', val: parseFloat(m[1]) * (m[2] ? 1000 : 1) };
+    m = /\bat\s+(\d+(?:\.\d+)?)\s*([kK])?/i.exec(t);
+    if (m) return { type: 'direct', val: parseFloat(m[1]) * (m[2] ? 1000 : 1) };
+    m = /(?:^|\s)(\d+(?:\.\d+)?)\s*$/.exec(t.trimEnd());
+    if (m) { const v = parseFloat(m[1]); if (v > 0) return { type: 'direct', val: v }; }
+
+    return null;
+  }
+
+  function formatMktPrice(price) {
+    if (!price) return '';
+    if (price.type === 'mp_pct') return `MP${price.val >= 0 ? '+' : ''}${price.val}%`;
+    if (price.type === 'mp_abs') return `MP${price.val >= 0 ? '+' : ''}${price.val}`;
+    const v = price.val;
+    if (v >= 1000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + 'k';
+    if (v < 1) return v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    return v % 1 === 0 ? String(v) : v.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  // ── Market results rendering ──────────────────────────────────────────
+  function renderMktResults(el, quotes, mode) {
+    if (mode === 'messages') { renderMktMessages(el, quotes); return; }
+    renderMktTable(el, quotes);
+  }
+
+  function renderMktTable(el, quotes) {
+    _ciMap.clear(); _ciNext = 0;
+    // Group: productId → quality → direction → priceKey → entries[]
+    const tree = {};
+    for (const q of quotes) {
+      const prod = q.productId;
+      const qual = q.quality || 'unspecified';
+      const dir  = q.direction;
+      const pk   = q.price ? `${q.price.type}|${q.price.val}` : 'none';
+      if (!tree[prod]) tree[prod] = {};
+      if (!tree[prod][qual]) tree[prod][qual] = { buy: {}, sell: {} };
+      if (!tree[prod][qual][dir][pk]) tree[prod][qual][dir][pk] = { price: q.price, entries: [] };
+      const sig = q.company + '\x00' + (q.body || '');
+      if (!tree[prod][qual][dir][pk].entries.some(e => e.sig === sig))
+        tree[prod][qual][dir][pk].entries.push({ name: q.company, body: q.body, retracted: q.retracted, datetime: q.datetime, direction: dir, sig });
+    }
+
+    if (!Object.keys(tree).length) { el.innerHTML = '<div class="scma-meta">无匹配报价</div>'; return; }
+
+    // Sort products by watchlist order
+    const wlOrder = mktWatchlist.map(w => w.id);
+    const prodIds = Object.keys(tree).map(Number).sort((a, b) => {
+      const ia = wlOrder.indexOf(a), ib = wlOrder.indexOf(b);
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+    });
+
+    let html = '';
+    for (const pid of prodIds) {
+      const qualMap = tree[pid];
+      const name = MKT_BY_ID[pid] || `ID:${pid}`;
+      html += `<div class="scma-prod"><div class="scma-prod-title">${escHtml(name)} <span class="scma-code">re-${pid}</span></div>`;
+      html += `<table class="scma-table"><thead><tr>
+        <th>等级</th><th class="scma-th-buy">BUY</th><th class="scma-th-sell">SELL</th>
+      </tr></thead><tbody>`;
+
+      const qkeys = Object.keys(qualMap).sort((a, b) => {
+        if (a === 'unspecified') return 1; if (b === 'unspecified') return -1;
+        return parseInt(a.slice(1)) - parseInt(b.slice(1));
+      });
+      for (const qk of qkeys) {
+        const fmtDir = (dirMap) => Object.values(dirMap).map(grp => {
+          const ci = _ciNext++; _ciMap.set(ci, grp.entries);
+          const allR = grp.entries.every(e => e.retracted);
+          const label = grp.price ? formatMktPrice(grp.price) : '?';
+          return `<span class="scma-price${allR ? ' scma-price--retracted' : ''}" title="${grp.entries.map(e=>e.name).join('\n')}" data-ci="${ci}">${escHtml(label)}<sup>×${grp.entries.length}</sup></span>`;
+        }).join(' ');
+        html += `<tr>
+          <td class="scma-q">${qk === 'unspecified' ? '未明确' : qk}</td>
+          <td class="scma-buy">${fmtDir(qualMap[qk].buy || {})}</td>
+          <td class="scma-sell">${fmtDir(qualMap[qk].sell || {})}</td>
+        </tr>`;
+      }
+      html += '</tbody></table></div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function renderMktMessages(el, quotes) {
+    const watchedIds = new Set(mktWatchlist.map(w => w.id));
+    // Deduplicate to unique messages by company+datetime, preserving directions
+    const seen = new Map();
+    for (const q of quotes) {
+      const key = q.company + '\x00' + (q.datetime || '');
+      if (!seen.has(key)) seen.set(key, { company: q.company, body: q.body, datetime: q.datetime, retracted: q.retracted, dirs: new Set() });
+      seen.get(key).dirs.add(q.direction);
+    }
+    const msgs = [...seen.values()].sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
+    if (!msgs.length) { el.innerHTML = '<div class="scma-meta">无匹配消息</div>'; return; }
+    el.innerHTML = msgs.map(m => {
+      const coUrl = `https://www.simcompanies.com/zh-cn/company/0/${encodeURIComponent(m.company)}/`;
+      const dirBadges = [...m.dirs].map(d => d === 'buy'
+        ? '<span class="scma-dir-buy">BUY</span>'
+        : '<span class="scma-dir-sell">SELL</span>').join(' ');
+      return `
+      <div class="scma-mkt-msg${m.retracted ? ' scma-mkt-msg--retracted' : ''}">
+        <div class="scma-mkt-msg-hd">
+          ${dirBadges}
+          <a class="scma-co-link scma-mkt-msg-co" href="${escHtml(coUrl)}" target="_blank" rel="noopener">${escHtml(m.company)}</a>
+          ${m.retracted ? '<span class="scma-pe-retract-badge">已撤回</span>' : ''}
+          <span class="scma-pe-time">${timeAgo(m.datetime)}</span>
+        </div>
+        <div class="scma-mkt-msg-body">${renderMktBody(m.body, watchedIds)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // Replace :re-N: with "English Chinese" spans; highlight watched products
+  function renderMktBody(text, watchedIds) {
+    let html = escHtml(text);
+    html = html.replace(/:re-(\d+):/g, (_, idStr) => {
+      const id    = parseInt(idStr);
+      const en    = MKT_BY_ID[id] || `re-${idStr}`;
+      const zh    = MKT_ZH[id] || '';
+      const label = zh ? `${en} ${zh}` : en;
+      const cls   = (watchedIds && watchedIds.has(id)) ? 'scma-mkt-re scma-mkt-re--watched' : 'scma-mkt-re';
+      return `<span class="${cls}" title="re-${idStr}">${escHtml(label)}</span>`;
+    });
+    return html;
+  }
+
   // ── Styles ────────────────────────────────────────────────────────────
   function injectStyles() {
     const css = `
-      /* ── Toggle button ── */
-      #scma-toggle {
+      /* ── Toggle buttons ── */
+      #scma-toggle-wrap {
         position: fixed; bottom: 18px; right: 18px; z-index: 2147483640;
-        background: #1e3a5f; color: #7dd3fc;
-        border: 1px solid #3b82f6; border-radius: 8px;
-        padding: 7px 13px; font-size: 13px; font-weight: 700;
-        cursor: pointer; box-shadow: 0 2px 10px #0006;
-        transition: background .15s;
+        display: flex; border-radius: 8px; overflow: hidden;
+        box-shadow: 0 2px 10px #0006;
       }
-      #scma-toggle:hover { background: #2a4f7a; }
+      #scma-toggle-aero, #scma-toggle-mkt {
+        background: #1e3a5f; color: #7dd3fc;
+        border: 1px solid #3b82f6;
+        padding: 7px 13px; font-size: 13px; font-weight: 700;
+        cursor: pointer; transition: background .15s;
+      }
+      #scma-toggle-aero { border-radius: 8px 0 0 8px; border-right-color: #2a5f8a; }
+      #scma-toggle-mkt  { border-radius: 0 8px 8px 0; border-left: none; }
+      #scma-toggle-aero:hover, #scma-toggle-mkt:hover { background: #2a4f7a; }
 
       /* ── Panel ── */
       #scma-panel {
@@ -904,15 +1517,6 @@
         font-weight: 700; color: #7dd3fc; margin-bottom: 4px;
         display: flex; align-items: center; gap: 6px;
       }
-      .scma-pe-copybtn {
-        font-size: 9px; padding: 1px 6px; border-radius: 4px;
-        background: #1e3a5f; color: #7dd3fc;
-        border: 1px solid #3b82f6; cursor: pointer;
-        font-family: inherit; font-weight: normal;
-        transition: background .1s;
-      }
-      .scma-pe-copybtn:hover { background: #2a4f7a; }
-      .scma-pe-copybtn--done { background: #14532d; color: #86efac; border-color: #22c55e; }
       .scma-pe--retracted { opacity: .7; }
       .scma-pe--retracted .scma-pe-name > span { text-decoration: line-through; text-decoration-color: #f87171; }
       .scma-pe--retracted .scma-pe-body { text-decoration: line-through; text-decoration-color: #f87171; }
@@ -943,7 +1547,7 @@
       #scma-help:hover { color: #7dd3fc !important; border-color: #7dd3fc !important; }
 
       /* ── Help overlay ── */
-      #scma-help-overlay {
+      #scma-help-overlay, #scma-mkt-help-overlay {
         display: flex; position: fixed; inset: 0; z-index: 2147483642;
         background: #00000080; align-items: center; justify-content: center;
       }
@@ -985,6 +1589,208 @@
       }
       .scma-help-tag.buy  { background: #14532d; color: #86efac; }
       .scma-help-tag.sell { background: #7f1d1d; color: #fca5a5; }
+
+      /* ── Market panel ── */
+      #scma-mkt-panel {
+        position: fixed; bottom: 58px; right: 18px; z-index: 2147483638;
+        width: 460px; max-height: 82vh;
+        display: flex; flex-direction: column;
+        background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 12px;
+        font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;
+        box-shadow: 0 8px 30px #0009; overflow: hidden;
+      }
+      #scma-mkt-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 9px 13px; background: #1e293b;
+        border-bottom: 1px solid #334155;
+        font-weight: 700; color: #7dd3fc; font-size: 13px;
+        border-radius: 12px 12px 0 0; flex-shrink: 0; user-select: none;
+      }
+      #scma-mkt-header button {
+        background: none; border: none; cursor: pointer;
+        color: #64748b; font-size: 14px; line-height: 1;
+      }
+      #scma-mkt-header button:hover { color: #f87171; }
+      #scma-mkt-controls {
+        display: flex; gap: 6px; align-items: center;
+        padding: 7px 12px; background: #1e293b;
+        border-bottom: 1px solid #334155; flex-shrink: 0; flex-wrap: wrap;
+      }
+      #scma-mkt-controls label {
+        font-size: 11px; color: #94a3b8;
+        display: flex; align-items: center; gap: 4px;
+      }
+      #scma-mkt-controls input[type="number"] { width: 44px; }
+      #scma-mkt-controls input {
+        background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 4px;
+        padding: 2px 5px; font-size: 11px; font-family: inherit;
+      }
+      #scma-mkt-search {
+        background: #1d4ed8; color: #bfdbfe; border: none;
+        border-radius: 6px; padding: 4px 10px; font-size: 11px;
+        font-weight: 700; cursor: pointer; transition: background .15s;
+      }
+      #scma-mkt-search:hover:not(:disabled) { background: #2563eb; }
+      #scma-mkt-search:disabled { opacity: .4; cursor: default; }
+      #scma-mkt-stop {
+        background: #7f1d1d; color: #fca5a5; border: none;
+        border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer;
+      }
+      #scma-mkt-stop:disabled { opacity: .4; cursor: default; }
+
+      /* ── Watchlist ── */
+      #scma-mkt-wl {
+        border-bottom: 1px solid #334155; flex-shrink: 0;
+        max-height: 200px; overflow-y: auto;
+      }
+      #scma-mkt-wl-add {
+        display: flex; gap: 6px; padding: 7px 12px;
+        border-bottom: 1px solid #1e293b; align-items: center;
+      }
+      /* ── Product select ── */
+      #scma-mkt-wl-sel {
+        flex: 1; background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 4px;
+        padding: 3px 6px; font-size: 11px; font-family: inherit;
+        cursor: pointer; min-height: 26px;
+      }
+      #scma-mkt-wl-sel:hover { border-color: #7dd3fc; }
+      #scma-mkt-wl-sel:focus { outline: none; border-color: #7dd3fc; }
+      #scma-mkt-room {
+        background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 4px;
+        padding: 2px 5px; font-size: 11px; font-family: inherit; cursor: pointer;
+      }
+      #scma-mkt-room:focus { outline: none; border-color: #7dd3fc; }
+
+      /* ── Company link ── */
+      .scma-co-link {
+        color: #7dd3fc; text-decoration: none; font-weight: 700;
+      }
+      .scma-co-link:hover { text-decoration: underline; }
+      #scma-mkt-wl-addbtn {
+        background: #1e3a5f; color: #93c5fd; border: 1px solid #3b82f6;
+        border-radius: 5px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+      }
+      #scma-mkt-wl-addbtn:hover { background: #2a4f7a; }
+      #scma-mkt-wl-list { padding: 4px 8px 6px; }
+      .scma-wl-empty { color: #475569; font-size: 11px; padding: 4px 4px; }
+      .scma-wl-item {
+        display: flex; align-items: center; gap: 6px;
+        padding: 4px 4px; border-bottom: 1px solid #1e293b17;
+        flex-wrap: wrap;
+      }
+      .scma-wl-item:last-child { border-bottom: none; }
+      .scma-wl-name { color: #93c5fd; font-weight: 700; font-size: 11px; min-width: 100px; }
+      .scma-wl-quals { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; }
+      .scma-wl-q {
+        font-size: 9px; padding: 1px 5px; border-radius: 3px; cursor: pointer;
+        background: #1e293b; color: #64748b; border: 1px solid #334155;
+        user-select: none;
+      }
+      .scma-wl-q:hover { border-color: #93c5fd; color: #93c5fd; }
+      .scma-wl-q--on { background: #1e3a5f; color: #93c5fd; border-color: #3b82f6; }
+      .scma-wl-rm {
+        background: none; border: none; color: #475569; cursor: pointer;
+        font-size: 11px; padding: 0 3px; flex-shrink: 0;
+      }
+      .scma-wl-rm:hover { color: #f87171; }
+
+      /* ── View toggle ── */
+      #scma-mkt-view {
+        display: flex; border-bottom: 1px solid #334155; flex-shrink: 0;
+      }
+      .scma-mkt-vtab {
+        flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
+        color: #475569; font-size: 11px; padding: 5px; cursor: pointer;
+        font-family: inherit; transition: color .15s;
+      }
+      .scma-mkt-vtab:hover { color: #94a3b8; }
+      .scma-mkt-vtab--on { color: #93c5fd; border-bottom-color: #3b82f6; }
+
+      /* ── Market status + results ── */
+      #scma-mkt-status {
+        padding: 5px 13px; font-size: 10px; color: #64748b;
+        border-bottom: 1px solid #1e293b; flex-shrink: 0; min-height: 22px;
+      }
+      #scma-mkt-results { padding: 10px 12px; overflow-y: auto; flex: 1; }
+
+      /* ── Messages view ── */
+      .scma-mkt-msg {
+        padding: 7px 10px; border-bottom: 1px solid #1e293b;
+        font-size: 11px;
+      }
+      .scma-mkt-msg:last-child { border-bottom: none; }
+      .scma-mkt-msg--retracted { opacity: .6; }
+      .scma-mkt-msg-hd {
+        display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
+      }
+      .scma-mkt-msg-co { color: #93c5fd; font-weight: 700; }
+      .scma-mkt-msg-body {
+        color: #94a3b8; white-space: pre-wrap; word-break: break-word;
+        line-height: 1.5;
+      }
+      .scma-mkt-msg--retracted .scma-mkt-msg-body {
+        text-decoration: line-through; text-decoration-color: #f87171;
+      }
+      .scma-mkt-re {
+        display: inline-block; background: #1e293b; color: #94a3b8;
+        border-radius: 3px; padding: 0 4px; font-size: 10px;
+      }
+      .scma-mkt-re--watched {
+        background: #1e3a5f; color: #93c5fd;
+        border: 1px solid #3b82f6; font-weight: 700;
+      }
+
+      /* ── Direction badges ── */
+      .scma-dir-buy {
+        display: inline-block; font-size: 9px; font-weight: 700;
+        padding: 0 4px; border-radius: 3px;
+        background: #14532d; color: #4ade80;
+      }
+      .scma-dir-sell {
+        display: inline-block; font-size: 9px; font-weight: 700;
+        padding: 0 4px; border-radius: 3px;
+        background: #7f1d1d; color: #f87171;
+      }
+
+      /* ── Market help button ── */
+      #scma-mkt-help {
+        font-size: 12px !important; font-weight: 700;
+        border: 1px solid #334155 !important; border-radius: 50% !important;
+        width: 18px; height: 18px; padding: 0 !important;
+        display: flex; align-items: center; justify-content: center;
+        color: #64748b !important;
+      }
+      #scma-mkt-help:hover { color: #93c5fd !important; border-color: #3b82f6 !important; }
+
+      /* ── Market about ── */
+      #scma-mkt-about {
+        border-top: 1px solid #1e293b; flex-shrink: 0;
+      }
+      #scma-mkt-about summary {
+        padding: 5px 13px; font-size: 10px; color: #475569;
+        cursor: pointer; list-style: none; user-select: none;
+      }
+      #scma-mkt-about summary::-webkit-details-marker { display: none; }
+      #scma-mkt-about summary::before { content: '▶ '; font-size: 8px; }
+      #scma-mkt-about[open] summary::before { content: '▼ '; }
+      #scma-mkt-about summary:hover { color: #93c5fd; }
+      #scma-mkt-about-body {
+        padding: 5px 13px 4px; font-size: 11px; color: #64748b;
+        display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+      }
+      #scma-mkt-about-body a { color: #93c5fd; text-decoration: none; }
+      #scma-mkt-about-body a:hover { text-decoration: underline; }
+      #scma-mkt-about-ver {
+        padding: 0 13px 8px; font-size: 11px; color: #64748b;
+        display: flex; align-items: center; gap: 5px;
+      }
+      #scma-mkt-about-ver a { color: #93c5fd; text-decoration: none; }
+      #scma-mkt-about-ver a:hover { text-decoration: underline; }
+      #scma-mkt-update-status { color: #86efac; }
     `;
     const s = document.createElement('style');
     s.id          = 'scma-styles';
