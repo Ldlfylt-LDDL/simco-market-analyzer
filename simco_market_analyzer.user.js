@@ -5,7 +5,10 @@
 // @description  实时抓取并解析 SimCompanies 聊天室中 SOR/BFR/JUM/LUX/SEP/SAT 的买卖报价，按产品/等级汇总
 // @author
 // @match        https://www.simcompanies.com/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
+// @updateURL    https://raw.githubusercontent.com/Ldlfylt-LDDL/simco-market-analyzer/main/simco_market_analyzer.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ldlfylt-LDDL/simco-market-analyzer/main/simco_market_analyzer.user.js
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -29,6 +32,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
+  const VERSION    = '1.0';
   const CHATROOM   = 'X';
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
   const PROD_CODE  = { SOR: 're-91', BFR: 're-94', JUM: 're-95', LUX: 're-96', SEP: 're-97', SAT: 're-99' };
@@ -85,6 +89,12 @@
           <span class="scma-sep">·</span>
           <a href="https://github.com/Ldlfylt-LDDL/simco-market-analyzer" target="_blank" rel="noopener">GitHub</a>
         </div>
+        <div id="scma-about-ver">
+          <span>v${VERSION}</span>
+          <span class="scma-sep">·</span>
+          <a id="scma-update-btn" href="#">检查更新</a>
+          <span id="scma-update-status"></span>
+        </div>
       </details>
     `;
     document.body.appendChild(panelEl);
@@ -93,6 +103,7 @@
     panelEl.querySelector('#scma-search').onclick = startSearch;
     panelEl.querySelector('#scma-stop').onclick   = stopSearch;
     panelEl.querySelector('#scma-copy').onclick   = copyResults;
+    panelEl.querySelector('#scma-update-btn').onclick = e => { e.preventDefault(); checkForUpdates(); };
 
     makeDraggable(panelEl, panelEl.querySelector('#scma-header'));
   }
@@ -514,6 +525,33 @@
     el.innerHTML = html;
   }
 
+  // ── Update check ─────────────────────────────────────────────────────
+  function checkForUpdates() {
+    const RAW_URL  = 'https://raw.githubusercontent.com/Ldlfylt-LDDL/simco-market-analyzer/main/simco_market_analyzer.user.js';
+    const DL_URL   = 'https://github.com/Ldlfylt-LDDL/simco-market-analyzer/raw/main/simco_market_analyzer.user.js';
+    const statusEl = panelEl && panelEl.querySelector('#scma-update-status');
+    if (statusEl) statusEl.textContent = '检查中…';
+
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: RAW_URL,
+      onload(res) {
+        const m = res.responseText.match(/\/\/\s*@version\s+(\S+)/);
+        if (!m) { if (statusEl) statusEl.textContent = '检查失败'; return; }
+        const remote = m[1];
+        if (remote === VERSION) {
+          if (statusEl) statusEl.textContent = '已是最新 ✓';
+        } else {
+          if (statusEl) statusEl.innerHTML =
+            `→ <a href="${DL_URL}" target="_blank" rel="noopener">v${remote} 可用，点击更新</a>`;
+        }
+      },
+      onerror()  { if (statusEl) statusEl.textContent = '网络错误'; },
+      ontimeout() { if (statusEl) statusEl.textContent = '超时'; },
+      timeout: 10000,
+    });
+  }
+
   // ── Styles ────────────────────────────────────────────────────────────
   function injectStyles() {
     const css = `
@@ -649,11 +687,16 @@
         padding: 5px 13px 8px; font-size: 11px; color: #64748b;
         display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
       }
-      #scma-about-body a {
+      #scma-about-body a, #scma-about-ver a {
         color: #7dd3fc; text-decoration: none;
       }
-      #scma-about-body a:hover { text-decoration: underline; }
+      #scma-about-body a:hover, #scma-about-ver a:hover { text-decoration: underline; }
       .scma-sep { color: #334155; }
+      #scma-about-ver {
+        padding: 0 13px 8px; font-size: 11px; color: #64748b;
+        display: flex; align-items: center; gap: 5px;
+      }
+      #scma-update-status { color: #86efac; }
     `;
     const s = document.createElement('style');
     s.id          = 'scma-styles';
