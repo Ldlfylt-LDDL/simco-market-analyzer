@@ -40,8 +40,9 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION    = '1.1';
-  const CHATROOM   = 'X';
+  const VERSION        = '1.1';
+  const CHATROOM       = 'X';
+  const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
   const PROD_CODE  = { SOR: 're-91', BFR: 're-94', JUM: 're-95', LUX: 're-96', SEP: 're-97', SAT: 're-99' };
 
@@ -208,6 +209,7 @@
         // Next page: from-id pagination
         url = `${BASE_URL}from-id/${minId}/`;
         if (page >= 50) break; // safety cap
+        if (!done) await new Promise(r => setTimeout(r, PAGE_DELAY_MS));
       }
 
       statusEl.textContent = `🔄 解析 ${allMsgs.length} 条消息…`;
