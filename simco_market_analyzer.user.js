@@ -63,7 +63,7 @@
     panelEl.id = 'scma-panel';
     panelEl.innerHTML = `
       <div id="scma-header">
-        <span>✈ 航空市场分析器</span>
+        <span>✈ 航空市场分析器<span id="scma-title-note">格式不规范的报价可能遗漏</span></span>
         <div style="display:flex;gap:6px;align-items:center">
           <button id="scma-copy" title="复制 JSON 结果">📋</button>
           <button id="scma-close">✕</button>
@@ -187,7 +187,7 @@
 
       statusEl.textContent = `🔄 解析 ${allMsgs.length} 条消息…`;
 
-      const quotes  = allMsgs.flatMap(parseMessage);
+      const quotes  = allMsgs.flatMap(parseMessage).filter(q => q.price === null || q.price > 0);
       const summary = buildSummary(quotes);
       _lastSummary  = summary;
       _lastQuotes   = quotes.length;
@@ -598,6 +598,11 @@
       }
       #scma-header button:hover { color: #f87171; }
       #scma-copy { font-size: 13px !important; }
+
+      #scma-title-note {
+        display: block; font-size: 9px; color: #94a3b8;
+        font-weight: normal; margin-top: 1px; letter-spacing: 0;
+      }
 
       /* ── Controls ── */
       #scma-controls {
