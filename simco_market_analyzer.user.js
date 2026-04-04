@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 市场报价分析器
 // @namespace    simco-market-quote-analyzer
-// @version      1.23
+// @version      1.24
 // @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
@@ -40,7 +40,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.23';
+  const VERSION        = '1.24';
   const CHATROOM       = 'X';
   let   REALM          = '0'; // updated async from auth-data API
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
@@ -728,7 +728,7 @@
           <h3>结果表格</h3>
           <p>结果按产品（SOR / BFR / JUM / LUX / SEP / SAT）分组，每个产品显示一张买卖汇总表：</p>
           <ul>
-            <li><b>等级</b> — 报价对应的品质（Q0–Q9）；<span class="scma-help-tag buy">BUY</span> 列为求购，<span class="scma-help-tag sell">SELL</span> 列为出售。</li>
+            <li><b>等级</b> — 报价对应的品质（Q0–Q12）；<span class="scma-help-tag buy">BUY</span> 列为求购，<span class="scma-help-tag sell">SELL</span> 列为出售。</li>
             <li>价格旁的 <b>×N</b> 表示有 N 条相同报价，可点击查看原始消息。</li>
             <li><span style="text-decoration:line-through;opacity:.6">划线价格</span> 表示对应消息已被撤回。</li>
             <li><b>无明确等级和报价</b> 行收录了未注明品质或价格的提及。</li>
@@ -785,14 +785,14 @@
           <p>搜索前须先添加关注物品：</p>
           <ul>
             <li>从下拉菜单选择物品（显示英文 / 中文），点击 <b>+ 关注</b> 加入列表。</li>
-            <li>每个物品可点击 <b>Q0–Q9</b> 标签过滤等级；<b>任意</b> 表示不限等级。</li>
+            <li>每个物品可点击 <b>Q0–Q12</b> 标签过滤等级；<b>任意</b> 表示不限等级。</li>
             <li>点击 <b>✕</b> 移除关注。关注列表自动持久化保存，刷新页面后仍然有效。</li>
           </ul>
 
           <h3>结果 — 汇总表</h3>
           <p>搜索完成后，每个关注物品显示一张买卖汇总表：</p>
           <ul>
-            <li><b>等级</b> 列显示 Q0–Q9；<span class="scma-help-tag buy">BUY</span> 为求购，<span class="scma-help-tag sell">SELL</span> 为出售。</li>
+            <li><b>等级</b> 列显示 Q0–Q12；<span class="scma-help-tag buy">BUY</span> 为求购，<span class="scma-help-tag sell">SELL</span> 为出售。</li>
             <li>每个价格标签旁的 <b>×N</b> 表示有 N 条消息报出此价格，可点击查看原始消息弹窗。</li>
             <li>价格格式：直接价（如 <b>34.5k</b>）、市场价百分比（如 <b>MP-3%</b>）、市场价差值（如 <b>MP-100</b>）。</li>
             <li><span style="text-decoration:line-through;opacity:.6">划线价格</span> 表示对应消息已被撤回。</li>
@@ -1067,7 +1067,7 @@
     el.innerHTML = mktWatchlist.map(w => {
       const name = MKT_BY_ID[w.id] || `ID:${w.id}`;
       const anyOn = !w.qualities || !w.qualities.length;
-      const qSpans = [0,1,2,3,4,5,6,7,8,9].map(q =>
+      const qSpans = [0,1,2,3,4,5,6,7,8,9,10,11,12].map(q =>
         `<span class="scma-wl-q${(!anyOn && w.qualities.includes(q)) ? ' scma-wl-q--on' : ''}" data-wid="${w.id}" data-q="${q}">Q${q}</span>`
       ).join('');
       return `<div class="scma-wl-item">
