@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 市场报价分析器
 // @namespace    simco-market-quote-analyzer
-// @version      1.2
+// @version      1.21
 // @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
@@ -40,8 +40,9 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.2';
+  const VERSION        = '1.21';
   const CHATROOM       = 'X';
+  const REALM          = (() => { const m = location.pathname.match(/\/r\/(\d+)\//); return m ? m[1] : '0'; })();
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
   const PROD_CODE  = { SOR: 're-91', BFR: 're-94', JUM: 're-95', LUX: 're-96', SEP: 're-97', SAT: 're-99' };
@@ -617,7 +618,7 @@
     }
 
     const rows = entries.map(en => {
-      const coUrl = `https://www.simcompanies.com/zh-cn/company/0/${encodeURIComponent(en.name)}/`;
+      const coUrl = `https://www.simcompanies.com/zh-cn/company/${REALM}/${encodeURIComponent(en.name)}/`;
       const dirBadge = en.direction === 'buy'
         ? '<span class="scma-dir-buy">BUY</span>'
         : en.direction === 'sell' ? '<span class="scma-dir-sell">SELL</span>' : '';
@@ -1314,7 +1315,7 @@
     const msgs = [...seen.values()].sort((a, b) => new Date(b.datetime) - new Date(a.datetime));
     if (!msgs.length) { el.innerHTML = '<div class="scma-meta">无匹配消息</div>'; return; }
     el.innerHTML = msgs.map(m => {
-      const coUrl = `https://www.simcompanies.com/zh-cn/company/0/${encodeURIComponent(m.company)}/`;
+      const coUrl = `https://www.simcompanies.com/zh-cn/company/${REALM}/${encodeURIComponent(m.company)}/`;
       const dirBadges = [...m.dirs].map(d => d === 'buy'
         ? '<span class="scma-dir-buy">BUY</span>'
         : '<span class="scma-dir-sell">SELL</span>').join(' ');
