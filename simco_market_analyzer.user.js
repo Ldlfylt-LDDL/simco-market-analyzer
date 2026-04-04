@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 市场报价分析器
 // @namespace    simco-market-quote-analyzer
-// @version      1.22
+// @version      1.23
 // @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
@@ -40,7 +40,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.22';
+  const VERSION        = '1.23';
   const CHATROOM       = 'X';
   let   REALM          = '0'; // updated async from auth-data API
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
@@ -648,11 +648,17 @@
     _popupEl.innerHTML = rows;
 
     // Position near click, keep within viewport
-    const pw = 320, ph = 240;
     const vw = window.innerWidth, vh = window.innerHeight;
-    _popupEl.style.left = Math.min(x + 8, vw - pw - 8) + 'px';
-    _popupEl.style.top  = Math.min(y + 8, vh - ph - 8) + 'px';
     _popupEl.style.display = 'block';
+    if (vw <= 600) {
+      // On mobile: center horizontally, anchor to top of viewport
+      _popupEl.style.left = '12px';
+      _popupEl.style.top  = '12px';
+    } else {
+      const pw = _popupEl.offsetWidth || 320, ph = _popupEl.offsetHeight || 240;
+      _popupEl.style.left = Math.min(x + 8, vw - pw - 8) + 'px';
+      _popupEl.style.top  = Math.min(y + 8, vh - ph - 8) + 'px';
+    }
   }
 
   function hideQuotePopup() {
@@ -1804,6 +1810,56 @@
       #scma-mkt-about-ver a { color: #93c5fd; text-decoration: none; }
       #scma-mkt-about-ver a:hover { text-decoration: underline; }
       #scma-mkt-update-status { color: #86efac; }
+
+      /* ── Responsive: tablet (≤600px) ── */
+      @media (max-width: 600px) {
+        #scma-toggle-wrap {
+          bottom: 10px; right: 10px;
+        }
+        #scma-toggle-aero, #scma-toggle-mkt {
+          padding: 10px 16px; font-size: 15px;
+        }
+        #scma-panel, #scma-mkt-panel {
+          width: calc(100vw - 16px);
+          right: 8px; bottom: 62px;
+          max-height: 78vh; font-size: 12px;
+        }
+        #scma-help-box {
+          width: calc(100vw - 24px);
+        }
+        #scma-popup {
+          width: calc(100vw - 24px);
+          left: 12px !important; right: 12px !important;
+          max-height: 55vh;
+        }
+      }
+
+      /* ── Responsive: phone portrait (≤400px) ── */
+      @media (max-width: 400px) {
+        #scma-panel, #scma-mkt-panel {
+          width: calc(100vw - 8px);
+          right: 4px; bottom: 60px;
+          max-height: 72vh;
+          border-radius: 10px;
+        }
+        #scma-controls, #scma-mkt-controls {
+          gap: 4px;
+        }
+        #scma-controls label, #scma-mkt-controls label {
+          font-size: 12px;
+        }
+        #scma-controls input, #scma-mkt-controls input {
+          font-size: 12px; padding: 4px 6px;
+        }
+        #scma-search, #scma-stop,
+        #scma-mkt-search, #scma-mkt-stop {
+          padding: 6px 12px; font-size: 12px;
+        }
+        .scma-table { font-size: 12px; }
+        .scma-mkt-msg { font-size: 12px; }
+        #scma-mkt-wl-sel { font-size: 12px; }
+        .scma-wl-name { min-width: 0; }
+      }
     `;
     const s = document.createElement('style');
     s.id          = 'scma-styles';
