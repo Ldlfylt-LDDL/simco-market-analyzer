@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 市场报价分析器
 // @namespace    simco-market-quote-analyzer
-// @version      1.21
+// @version      1.22
 // @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
@@ -40,9 +40,9 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.21';
+  const VERSION        = '1.22';
   const CHATROOM       = 'X';
-  const REALM          = (() => { const m = location.pathname.match(/\/r\/(\d+)\//); return m ? m[1] : '0'; })();
+  let   REALM          = '0'; // updated async from auth-data API
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
   const PROD_ORDER = ['SOR', 'BFR', 'JUM', 'LUX', 'SEP', 'SAT'];
   const PROD_CODE  = { SOR: 're-91', BFR: 're-94', JUM: 're-95', LUX: 're-96', SEP: 're-97', SAT: 're-99' };
@@ -52,7 +52,19 @@
   let panelEl   = null;
 
   // ── Boot ─────────────────────────────────────────────────────────────
+  async function fetchRealm() {
+    try {
+      const res = await fetch('https://www.simcompanies.com/api/v3/companies/auth-data/', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        const rid = data?.authCompany?.realmId;
+        if (rid != null) REALM = String(rid);
+      }
+    } catch (_) {}
+  }
+
   function init() {
+    fetchRealm();
     injectStyles();
     injectToggleButton();
   }
