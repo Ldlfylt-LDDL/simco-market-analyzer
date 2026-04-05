@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         SimCo 市场报价分析器
 // @namespace    simco-market-quote-analyzer
-// @version      1.24
+// @version      1.27
 // @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/Ldlfylt-LDDL/simco-market-analyzer/main/simco_market_analyzer.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ldlfylt-LDDL/simco-market-analyzer/main/simco_market_analyzer.user.js
@@ -40,7 +41,7 @@
   const SELL_RE   = /\b(sell(?:ing)?|vend(?:ing|o)?|offer(?:ing)?|auction|verkauf)\b/i;
   const BUY_RE    = /\b(buy(?:i?n?g?)?|want(?:ing|ed)?|need(?:ing)?|spending|compra)\b/i;
   const RENT_RE   = /\brent(?:ing|al|s)?\b|for\s+rent/i;
-  const VERSION        = '1.24';
+  const VERSION        = '1.26';
   const CHATROOM       = 'X';
   let   REALM          = '0'; // updated async from auth-data API
   const PAGE_DELAY_MS  = 800; // ~1.2 pages/sec，避免频繁请求被封
@@ -69,6 +70,50 @@
     injectToggleButton();
   }
 
+  // ── Price history (localStorage) ─────────────────────────────────────
+  const PRICE_HISTORY_MAX  = 5000; // 最多保留条目数（每个 realm 独立）
+  const PRICE_BODY_KEEP    = 2000; // 只有最新 N 条保留 body，旧条目清空节省空间
+  const priceHistoryKey = () => `scma-price-history-r${REALM}`;
+
+  function savePriceHistory(quotes) {
+    const now = Date.now();
+    const key = priceHistoryKey();
+    // 只保存有明确价格、有产品代码的航天报价
+    const newEntries = quotes
+      .filter(q => q.price !== null && q.price > 0 && PROD_ORDER.includes(q.product))
+      .map(q => ({
+        prod:      q.product,
+        quality:   q.quality || 'Q0',
+        price:     q.price,
+        direction: q.direction,
+        company:   q.company,
+        body:      (q.body || '').slice(0, 300),
+        msgTime:   q.datetime ? new Date(q.datetime).getTime() : now,
+        savedAt:   now,
+      }));
+
+    if (!newEntries.length) return;
+
+    let history = [];
+    try { history = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_) {}
+
+    // 去重：同一公司同一消息时间的同产品报价只存一次
+    const existingKeys = new Set(history.map(e => `${e.company}|${e.msgTime}|${e.prod}|${e.quality}`));
+    const toAdd = newEntries.filter(e => !existingKeys.has(`${e.company}|${e.msgTime}|${e.prod}|${e.quality}`));
+
+    history = [...history, ...toAdd];
+    // 超出上限时删最旧的
+    if (history.length > PRICE_HISTORY_MAX) history = history.slice(history.length - PRICE_HISTORY_MAX);
+    // 只保留最新 PRICE_BODY_KEEP 条的 body，旧条目清空
+    const bodyStart = history.length - PRICE_BODY_KEEP;
+    for (let i = 0; i < bodyStart; i++) {
+      if (history[i].body) history[i] = { ...history[i], body: '' };
+    }
+
+    try { localStorage.setItem(key, JSON.stringify(history)); } catch (_) {}
+    console.log(`[SCMA] Realm${REALM} 价格历史 +${toAdd.length} 条，共 ${history.length} 条`);
+  }
+
   // ── Toggle buttons (bottom-right corner) ─────────────────────────────
   function injectToggleButton() {
     const wrap = document.createElement('div');
@@ -79,9 +124,182 @@
     const b2 = document.createElement('button');
     b2.id = 'scma-toggle-mkt'; b2.innerHTML = '🌐';
     b2.onclick = () => mktPanelEl ? destroyMktPanel() : createMktPanel();
-    wrap.appendChild(b1); wrap.appendChild(b2);
+    const b3 = document.createElement('button');
+    b3.id = 'scma-toggle-chart'; b3.innerHTML = '📈';
+    b3.title = '航天价格走势图';
+    b3.onclick = () => chartPanelEl ? destroyChartPanel() : createChartPanel();
+    wrap.appendChild(b1); wrap.appendChild(b2); wrap.appendChild(b3);
     document.body.appendChild(wrap);
   }
+
+  // ── Chart panel ───────────────────────────────────────────────────────
+  let chartPanelEl  = null;
+  let chartInstance = null;
+  let chartJsReady  = false;
+
+  function loadChartJs(cb) {
+    if (chartJsReady) { cb(); return; }
+    const s1 = document.createElement('script');
+    s1.src = 'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js';
+    s1.onload = () => {
+      const s2 = document.createElement('script');
+      s2.src = 'https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js';
+      s2.onload = () => { chartJsReady = true; cb(); };
+      document.head.appendChild(s2);
+    };
+    document.head.appendChild(s1);
+  }
+
+  const CHART_COLORS = {
+    sell: { border: '#f87171', bg: 'rgba(248,113,113,0.15)' },
+    buy:  { border: '#4ade80', bg: 'rgba(74,222,128,0.15)'  },
+  };
+
+  function renderChartPanel() {
+    if (!chartPanelEl) return;
+    const prod  = chartPanelEl.querySelector('#scma-ch-prod').value;
+    const qual  = chartPanelEl.querySelector('#scma-ch-qual').value;
+    const dir   = chartPanelEl.querySelector('#scma-ch-dir').value;
+    const days  = parseInt(chartPanelEl.querySelector('#scma-ch-range').value);
+    const outlier = chartPanelEl.querySelector('#scma-ch-outlier').checked;
+    const cutoff  = days ? Date.now() - days * 86400000 : 0;
+
+    let raw = [];
+    try { raw = JSON.parse(localStorage.getItem(priceHistoryKey()) || '[]'); } catch (_) {}
+
+    let pts = raw.filter(e =>
+      e.prod === prod &&
+      (qual === 'all' || e.quality === qual) &&
+      (dir  === 'all' || e.direction === dir) &&
+      e.msgTime >= cutoff
+    ).sort((a, b) => a.msgTime - b.msgTime);
+
+    if (outlier) {
+      pts = pts.filter(e => !e.outlier);
+    }
+
+    const infoEl  = chartPanelEl.querySelector('#scma-ch-info');
+    const emptyEl = chartPanelEl.querySelector('#scma-ch-empty');
+    const canvas  = chartPanelEl.querySelector('#scma-ch-canvas');
+    infoEl.textContent = `${pts.length} 条数据点`;
+
+    if (!pts.length) {
+      emptyEl.style.display = 'flex'; canvas.style.display = 'none';
+      if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+      return;
+    }
+    emptyEl.style.display = 'none'; canvas.style.display = 'block';
+
+    const datasets = [];
+    for (const d of (dir === 'all' ? ['sell', 'buy'] : [dir])) {
+      const sub = pts.filter(e => e.direction === d);
+      if (!sub.length) continue;
+      datasets.push({
+        label: d === 'sell' ? 'SELL' : 'BUY',
+        data: sub.map(e => ({ x: e.msgTime, y: e.price, company: e.company, quality: e.quality })),
+        borderColor: CHART_COLORS[d].border, backgroundColor: CHART_COLORS[d].bg,
+        pointRadius: 4, pointHoverRadius: 6, tension: 0.2,
+        fill: dir !== 'all',
+      });
+    }
+
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    const body = chartPanelEl.querySelector('#scma-ch-body');
+    canvas.width  = body.clientWidth  - 24;
+    canvas.height = 296; // 320px body - 12px*2 padding
+    const ChartCtor = unsafeWindow.Chart;
+    console.log('[SCMA] Chart.js available:', typeof ChartCtor, 'canvas:', canvas.width, 'x', canvas.height, 'datasets:', datasets.length);
+    setTimeout(() => {
+      try {
+      chartInstance = new ChartCtor(canvas, {
+        type: 'line',
+        data: { datasets },
+        options: {
+          responsive: false,
+          animation: false,
+          interaction: { mode: 'nearest', intersect: false },
+          plugins: {
+            legend: { labels: { color: '#94a3b8', font: { family: 'Consolas' } } },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const p = ctx.raw;
+                  return ` ${ctx.dataset.label}  ${(p.y/1000).toFixed(1)}k  Q:${p.quality}  @${p.company}`;
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              type: 'time',
+              time: { tooltipFormat: 'yyyy-MM-dd HH:mm', displayFormats: { day: 'MM/dd', hour: 'MM/dd HH:mm' } },
+              ticks: { color: '#64748b' }, grid: { color: '#1e293b' },
+            },
+            y: {
+              ticks: { color: '#64748b', callback: v => (v/1000).toFixed(0)+'k' },
+              grid: { color: '#1e293b' },
+              title: { display: true, text: '价格', color: '#64748b' },
+            }
+          }
+        }
+      });
+      } catch(e) {
+        console.error('[SCMA Chart error]', e);
+        const infoEl = chartPanelEl?.querySelector('#scma-ch-info');
+        if (infoEl) infoEl.textContent += ' ❌' + e.message;
+      }
+    }, 0);
+  }
+
+  function createChartPanel() {
+    chartPanelEl = document.createElement('div');
+    chartPanelEl.id = 'scma-ch-panel';
+    const qualOpts = ['<option value="all">全部</option>',
+      ...[...Array(13)].map((_, i) => `<option value="Q${i}">Q${i}</option>`)].join('');
+    chartPanelEl.innerHTML = `
+      <div id="scma-ch-header">
+        <span>📈 航天价格走势</span>
+        <button id="scma-ch-close">✕</button>
+      </div>
+      <div id="scma-ch-controls">
+        <label>产品<select id="scma-ch-prod">
+          <option value="SOR">SOR</option><option value="BFR">BFR</option>
+          <option value="JUM">JUM</option><option value="LUX">LUX</option>
+          <option value="SEP">SEP</option><option value="SAT">SAT</option>
+        </select></label>
+        <label>品质<select id="scma-ch-qual">${qualOpts}</select></label>
+        <label>方向<select id="scma-ch-dir">
+          <option value="all">全部</option>
+          <option value="sell">SELL</option>
+          <option value="buy">BUY</option>
+        </select></label>
+        <label>时段<select id="scma-ch-range">
+          <option value="7">近7天</option>
+          <option value="30">近30天</option>
+          <option value="90">近90天</option>
+          <option value="0">全部</option>
+        </select></label>
+        <label><input type="checkbox" id="scma-ch-outlier" checked>去异常</label>
+        <span id="scma-ch-info" style="color:#475569;font-size:10px;margin-left:auto"></span>
+      </div>
+      <div id="scma-ch-body">
+        <canvas id="scma-ch-canvas"></canvas>
+        <div id="scma-ch-empty">暂无数据 — 请先用✈航天分析器抓取报价</div>
+      </div>`;
+    document.body.appendChild(chartPanelEl);
+    makeDraggable(chartPanelEl, chartPanelEl.querySelector('#scma-ch-header'));
+    chartPanelEl.querySelector('#scma-ch-close').onclick = destroyChartPanel;
+    ['#scma-ch-prod','#scma-ch-qual','#scma-ch-dir','#scma-ch-range','#scma-ch-outlier']
+      .forEach(sel => chartPanelEl.querySelector(sel).onchange = renderChartPanel);
+    updatePanelPositions();
+    loadChartJs(renderChartPanel);
+  }
+
+  function destroyChartPanel() {
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    if (chartPanelEl) { chartPanelEl.remove(); chartPanelEl = null; }
+  }
+
 
   // ── Panel ─────────────────────────────────────────────────────────────
   function createPanel() {
@@ -97,16 +315,39 @@
         </div>
       </div>
 
-      <div id="scma-controls">
-        <label title="向前搜索几小时的消息">
-          时 <input id="scma-hours" type="number" value="4" min="1" max="12">
-        </label>
-        <button id="scma-search">🔍 搜索</button>
-        <button id="scma-stop" disabled>⏹</button>
+      <div id="scma-tabs">
+        <button class="scma-tab scma-tab--on" data-tab="live">实时搜索</button>
+        <button class="scma-tab" data-tab="hist" id="scma-tab-hist-btn">历史记录</button>
       </div>
 
-      <div id="scma-status">准备就绪</div>
-      <div id="scma-results"></div>
+      <div id="scma-tab-live">
+        <div id="scma-controls">
+          <label title="向前搜索几小时的消息">
+            时 <input id="scma-hours" type="number" value="4" min="1" max="240">
+          </label>
+          <button id="scma-search">🔍 搜索</button>
+          <button id="scma-stop" disabled>⏹</button>
+        </div>
+        <div id="scma-status">准备就绪</div>
+        <div id="scma-results"></div>
+      </div>
+
+      <div id="scma-tab-hist" style="display:none">
+        <div id="scma-hist-controls">
+          <label>时段<select id="scma-hist-range">
+            <option value="1">近1小时</option>
+            <option value="4">近4小时</option>
+            <option value="24" selected>近24小时</option>
+            <option value="168">近7天</option>
+            <option value="720">近30天</option>
+            <option value="0">全部</option>
+          </select></label>
+          <label>截止<input type="datetime-local" id="scma-hist-end" title="留空 = 当前时间"></label>
+          <button id="scma-hist-refresh">↺ 刷新</button>
+          <span id="scma-hist-info"></span>
+        </div>
+        <div id="scma-hist-results"></div>
+      </div>
 
       <details id="scma-about">
         <summary>关于</summary>
@@ -136,15 +377,34 @@
     panelEl.querySelector('#scma-help').onclick   = showHelpPopup;
     panelEl.querySelector('#scma-update-btn').onclick = e => { e.preventDefault(); checkForUpdates(); };
 
+    // ── Tab switching ──────────────────────────────────────────────────
+    panelEl.querySelectorAll('.scma-tab').forEach(tab => {
+      tab.onclick = () => {
+        const mode = tab.dataset.tab;
+        panelEl.querySelectorAll('.scma-tab').forEach(t => t.classList.remove('scma-tab--on'));
+        tab.classList.add('scma-tab--on');
+        panelEl.querySelector('#scma-tab-live').style.display = mode === 'live' ? '' : 'none';
+        panelEl.querySelector('#scma-tab-hist').style.display = mode === 'hist' ? 'flex' : 'none';
+        if (mode === 'hist') renderHistoryTab();
+        else if (mode === 'live' && _lastSummary)
+          renderResults(panelEl.querySelector('#scma-results'), _lastSummary, _lastQuotes, _lastMsgs);
+      };
+    });
+    panelEl.querySelector('#scma-hist-refresh').onclick = renderHistoryTab;
+    panelEl.querySelector('#scma-hist-range').onchange  = renderHistoryTab;
+    panelEl.querySelector('#scma-hist-end').onchange    = renderHistoryTab;
+
     makeDraggable(panelEl, panelEl.querySelector('#scma-header'));
 
-    panelEl.querySelector('#scma-results').addEventListener('click', e => {
+    const onPriceClick = e => {
       const span = e.target.closest('[data-ci]');
       if (!span) return;
-      const entries = _ciMap.get(parseInt(span.dataset.ci));
-      if (!entries) return;
-      showQuotePopup(e.clientX, e.clientY, entries);
-    });
+      const ciData = _ciMap.get(parseInt(span.dataset.ci));
+      if (!ciData) return;
+      showQuotePopup(e.clientX, e.clientY, ciData);
+    };
+    panelEl.querySelector('#scma-results').addEventListener('click', onPriceClick);
+    panelEl.querySelector('#scma-hist-results').addEventListener('click', onPriceClick);
 
     if (_lastSummary) {
       renderResults(panelEl.querySelector('#scma-results'), _lastSummary, _lastQuotes, _lastMsgs);
@@ -157,6 +417,51 @@
     stopSearch();
     if (panelEl) { panelEl.remove(); panelEl = null; }
     updatePanelPositions();
+  }
+
+  // ── History tab ───────────────────────────────────────────────────────
+  function renderHistoryTab() {
+    if (!panelEl) return;
+    const rangeH = parseInt(panelEl.querySelector('#scma-hist-range').value);
+    const endVal = panelEl.querySelector('#scma-hist-end').value;
+    const endMs  = endVal ? new Date(endVal).getTime() : Date.now();
+    const startMs = rangeH ? endMs - rangeH * 3600000 : 0;
+
+    let raw = [];
+    try { raw = JSON.parse(localStorage.getItem(priceHistoryKey()) || '[]'); } catch (_) {}
+
+    const pts = raw.filter(e => e.msgTime >= startMs && e.msgTime <= endMs);
+
+    // Update tab label with latest data-point time in the current slice
+    const histBtn = panelEl.querySelector('#scma-tab-hist-btn');
+    if (pts.length) {
+      const latest = Math.max(...pts.map(e => e.msgTime));
+      const d = new Date(latest);
+      const fmt = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+      histBtn.textContent = `历史 截至${fmt}`;
+    } else {
+      histBtn.textContent = '历史记录';
+    }
+
+    const resultsEl = panelEl.querySelector('#scma-hist-results');
+    const infoEl    = panelEl.querySelector('#scma-hist-info');
+    infoEl.textContent = `${pts.length} 条`;
+
+    if (!pts.length) {
+      resultsEl.innerHTML = '<div class="scma-meta">暂无数据 — 请先用「实时搜索」抓取报价</div>';
+      return;
+    }
+
+    const quotes = pts.map(e => ({
+      product: e.prod, quality: e.quality, price: e.price,
+      direction: e.direction, company: e.company,
+      datetime: new Date(e.msgTime).toISOString(),
+      body: e.body || '', retracted: false,
+      outlier: e.outlier || false,
+    }));
+
+    const summary = buildSummary(quotes);
+    renderResults(resultsEl, summary, quotes.length, pts.length, `${pts.length} 条历史记录`);
   }
 
   // ── Drag support ──────────────────────────────────────────────────────
@@ -239,6 +544,17 @@
       statusEl.textContent = `🔄 解析 ${allMsgs.length} 条消息…`;
 
       const quotes  = allMsgs.flatMap(parseMessage).filter(q => q.price === null || q.price > 0);
+      savePriceHistory(quotes);
+      // Merge outlier flags from storage so live results reflect manual marks
+      try {
+        const histMap = new Map();
+        const raw = JSON.parse(localStorage.getItem(priceHistoryKey()) || '[]');
+        for (const e of raw) histMap.set(`${e.company}|${e.msgTime}|${e.prod}|${e.quality}`, e.outlier || false);
+        for (const q of quotes) {
+          const mt = q.datetime ? new Date(q.datetime).getTime() : 0;
+          q.outlier = histMap.get(`${q.company}|${mt}|${q.product}|${q.quality || 'Q0'}`) || false;
+        }
+      } catch (_) {}
       const summary = buildSummary(quotes);
       _lastSummary  = summary;
       _lastQuotes   = quotes.length;
@@ -317,28 +633,39 @@
   //   Quality : Q6⭐️...
   //   Price   : $37.6k
   function tryStructuredParse(lines, company, body = '', retracted = false, datetime = null) {
-    const qualLine  = lines.find(l => /[Qq]uality\s*[:：]\s*[Qq]\d+/.test(l));
-    const priceLine = lines.find(l => /[Pp]rice\s*[:：]\s*[\$\$]?\s*\d/.test(l));
-    if (!qualLine || !priceLine) return [];
+    // Collect indices of all Quality: and Price: lines
+    const qualIdxs  = lines.reduce((a, l, i) => { if (/[Qq]uality\s*[:：]\s*[Qq]\d+/.test(l))       a.push(i); return a; }, []);
+    const priceIdxs = lines.reduce((a, l, i) => { if (/[Pp]rice\s*[:：]\s*[\$\$]?\s*\d/.test(l)) a.push(i); return a; }, []);
+    if (!qualIdxs.length || !priceIdxs.length) return [];
 
     // Direction: scan all lines, default to 'sell' (structured posts are almost always sellers)
     const dir = detectDir(lines.join(' ')) || 'sell';
+    const results = [];
 
-    // Quality
-    const qm      = qualLine.match(/[Qq]uality\s*[:：]\s*([Qq]\d+)/);
-    const quality  = qm ? `Q${parseInt(qm[1].slice(1))}` : null;
+    // Each Quality line anchors one product block; find the Price line that follows it
+    for (let bi = 0; bi < qualIdxs.length; bi++) {
+      const qi    = qualIdxs[bi];
+      const nextQi = qualIdxs[bi + 1] ?? lines.length;
+      const pi    = priceIdxs.find(i => i > qi && i < nextQi);
+      if (pi === undefined) continue;
 
-    // Price
-    const pm    = priceLine.match(/[Pp]rice\s*[:：]\s*\$?\s*(\d+[\.,]?\d*)\s*[kK]/);
-    const price = pm ? Math.round(parseFloat(pm[1].replace(',', '.')) * 1000) : null;
+      // Block spans from after the previous block's price line to the current price line
+      const prevPi = bi > 0 ? (priceIdxs.find(i => i > qualIdxs[bi - 1]) ?? qualIdxs[bi - 1]) : -1;
+      const blockLines = lines.slice(prevPi + 1, pi + 1);
 
-    // Products: scan all lines
-    const seen = new Set();
-    for (const line of lines)
-      for (const m of findAllMentions(line)) seen.add(m.product);
-    if (!seen.size) return [];
+      const qm      = lines[qi].match(/[Qq]uality\s*[:：]\s*([Qq]\d+)/);
+      const quality = qm ? `Q${parseInt(qm[1].slice(1))}` : null;
+      const pm      = lines[pi].match(/[Pp]rice\s*[:：]\s*\$?\s*(\d+[\.,]?\d*)\s*([kK])?/);
+      const price   = pm ? (() => { const r = parseFloat(pm[1].replace(',', '.')); return Math.round(pm[2] || r <= 9999 ? r * 1000 : r); })() : null;
 
-    return [...seen].map(p => ({ company, direction: dir, product: p, quality, price, from_delta: false, body, retracted, datetime }));
+      const seen = new Set();
+      for (const line of blockLines)
+        for (const m of findAllMentions(line)) seen.add(m.product);
+      if (!seen.size) continue;
+
+      results.push(...[...seen].map(p => ({ company, direction: dir, product: p, quality, price, from_delta: false, body, retracted, datetime })));
+    }
+    return results;
   }
 
   // ── Direction detection ───────────────────────────────────────────────
@@ -479,18 +806,26 @@
 
     // Single price
     let price = null, m;
-    m = /\bat\s+(\d{1,4}(?:\.\d+)?)\s*[kK]/i.exec(t);
+    // "at 34.5k" or "at 34.5" (k optional — aerospace prices always in thousands)
+    m = /\bat\s+(\d{1,4}(?:\.\d+)?)\s*[kK]?/i.exec(t);
     if (m) { price = Math.round(parseFloat(m[1]) * 1000); }
     if (!price) {
-      m = /[@$]\s*(\d{1,4}(?:\.\d+)?)\s*[kK](?![a-zA-Z/])/.exec(t);
+      // "@34.5k" or "@34.5" or "$34.5k" or "$34.5"
+      m = /[@$]\s*(\d{1,4}(?:\.\d+)?)\s*[kK]?(?![a-zA-Z/])/.exec(t);
       if (m) price = Math.round(parseFloat(m[1]) * 1000);
     }
     if (!price) {
       const tc = delta !== null
         ? t.replace(/([+-])\/?\-?\s*(\d+(?:\.\d+)?)\s*[kK]?\s*(?:\/\s*[qQ])?/, '')
         : t;
+      // bare number with k: "34.5k", "920k"
       m = /(?<![/\d])(\d{2,4}(?:\.\d+)?)\s*[kK](?![a-zA-Z/])/.exec(tc);
       if (m) price = Math.round(parseFloat(m[1]) * 1000);
+      // bare decimal without k: "34.5" → 34500 (integers are too ambiguous to auto-scale)
+      if (!price) {
+        m = /(?<![/\d.])(\d{1,4}\.\d{1,3})(?![kK\d])/.exec(tc);
+        if (m) { const v = parseFloat(m[1]); if (v >= 1 && v <= 9999) price = Math.round(v * 1000); }
+      }
     }
     if (!price && prices) price = prices[0];
     return { price, prices, delta };
@@ -508,7 +843,7 @@
       // deduplicate by company+body
       const sig = q.company + '\x00' + (q.body || '');
       if (!tree[prod][qual][dir][key].some(e => e.sig === sig))
-        tree[prod][qual][dir][key].push({ name: q.company, body: q.body || '', retracted: !!q.retracted, datetime: q.datetime || null, direction: dir, sig });
+        tree[prod][qual][dir][key].push({ name: q.company, body: q.body || '', retracted: !!q.retracted, datetime: q.datetime || null, msgTime: q.datetime ? new Date(q.datetime).getTime() : null, outlier: !!q.outlier, direction: dir, sig });
     }
     const result = {};
     for (const [prod, quals] of Object.entries(tree)) {
@@ -526,7 +861,7 @@
               price: p === 'no_price' ? null : parseInt(p),
               count: arr.length,
               companies: [...new Set(arr.map(e => e.name))].sort(),
-              entries: arr.map(({ name, body, retracted, datetime, direction }) => ({ name, body, retracted, datetime, direction })),
+              entries: arr.map(({ name, body, retracted, datetime, msgTime, outlier, direction }) => ({ name, body, retracted, datetime, msgTime, outlier, direction })),
             }))
             .sort((a, b) => (a.price ?? 0) - (b.price ?? 0));
         }
@@ -536,10 +871,11 @@
   }
 
   // ── Render results ────────────────────────────────────────────────────
-  function renderResults(el, summary, totalQuotes, totalMsgs) {
+  function renderResults(el, summary, totalQuotes, totalMsgs, metaOverride) {
     _ciMap.clear();
     _ciNext = 0;
-    let html = `<div class="scma-meta">${totalMsgs} 条消息 → ${totalQuotes} 条报价</div>`;
+    const metaTxt = metaOverride !== undefined ? metaOverride : `${totalMsgs} 条消息 → ${totalQuotes} 条报价`;
+    let html = `<div class="scma-meta">${metaTxt}</div>`;
 
     for (const prod of PROD_ORDER) {
       const qualMap = summary[prod];
@@ -566,8 +902,10 @@
           const tip        = e.companies.join('\n');
           const ci         = _ciNext++;
           const allRetract = e.entries.every(en => en.retracted);
-          _ciMap.set(ci, e.entries);
-          return `<span class="scma-price${allRetract ? ' scma-price--retracted' : ''}" title="${tip}" data-ci="${ci}">${p}<sup>×${e.count}</sup></span>`;
+          const allOutlier = e.entries.every(en => en.outlier);
+          const anyOutlier = !allOutlier && e.entries.some(en => en.outlier);
+          _ciMap.set(ci, { entries: e.entries, prod, qual });
+          return `<span class="scma-price${allRetract ? ' scma-price--retracted' : ''}${allOutlier ? ' scma-price--outlier' : anyOutlier ? ' scma-price--has-outlier' : ''}" title="${tip}" data-ci="${ci}">${p}<sup>×${e.count}</sup></span>`;
         }).join(' ');
 
         html += `<tr>
@@ -583,7 +921,7 @@
       if (anyBuyNp || anySellNp) {
         const mkNpSpan = (e) => {
           const ci = _ciNext++;
-          _ciMap.set(ci, e.entries);
+          _ciMap.set(ci, { entries: e.entries, prod, qual: 'unspecified' });
           return `<span class="scma-price" title="${e.companies.join('\n')}" data-ci="${ci}">×${e.count}</span>`;
         };
         html += `<tr class="scma-np">
@@ -617,7 +955,12 @@
   // ── Quote popup ───────────────────────────────────────────────────────
   let _popupEl = null;
 
-  function showQuotePopup(x, y, entries) {
+  function showQuotePopup(x, y, ciData) {
+    // ciData = { entries, prod, qual } or legacy array
+    const entries = Array.isArray(ciData) ? ciData : ciData.entries;
+    const ctxProd = Array.isArray(ciData) ? null : ciData.prod;
+    const ctxQual = Array.isArray(ciData) ? null : ciData.qual;
+
     if (!_popupEl) {
       _popupEl = document.createElement('div');
       _popupEl.id = 'scma-popup';
@@ -629,23 +972,49 @@
       document.addEventListener('keydown', ev => { if (ev.key === 'Escape') hideQuotePopup(); });
     }
 
-    const rows = entries.map(en => {
+    const rows = entries.map((en, idx) => {
       const coUrl = `https://www.simcompanies.com/zh-cn/company/${REALM}/${encodeURIComponent(en.name)}/`;
       const dirBadge = en.direction === 'buy'
         ? '<span class="scma-dir-buy">BUY</span>'
         : en.direction === 'sell' ? '<span class="scma-dir-sell">SELL</span>' : '';
+      const canMark = ctxProd && en.msgTime;
+      const outlierBtn = canMark
+        ? `<button class="scma-btn-outlier${en.outlier ? ' scma-btn-outlier--on' : ''}" data-idx="${idx}" title="${en.outlier ? '取消异常标记' : '标为异常值'}">${en.outlier ? '⚠ 异常' : '⚠'}</button>`
+        : '';
       return `
-      <div class="scma-pe${en.retracted ? ' scma-pe--retracted' : ''}">
+      <div class="scma-pe${en.retracted ? ' scma-pe--retracted' : ''}${en.outlier ? ' scma-pe--outlier' : ''}">
         <div class="scma-pe-name">
           ${dirBadge}
           <a class="scma-co-link" href="${escHtml(coUrl)}" target="_blank" rel="noopener">${escHtml(en.name)}</a>
           ${en.retracted ? '<span class="scma-pe-retract-badge">已撤回</span>' : ''}
           ${en.datetime ? `<span class="scma-pe-time">${timeAgo(en.datetime)}</span>` : ''}
+          ${outlierBtn}
         </div>
         <div class="scma-pe-body">${renderMsgBody(en.body)}</div>
       </div>`;
     }).join('');
     _popupEl.innerHTML = rows;
+
+    // Outlier toggle button handler
+    if (ctxProd) {
+      _popupEl.querySelectorAll('.scma-btn-outlier').forEach(btn => {
+        btn.onclick = (ev) => {
+          ev.stopPropagation();
+          const idx = parseInt(btn.dataset.idx);
+          const en = entries[idx];
+          if (!en.msgTime) return;
+          const newState = toggleOutlier(en.name, en.msgTime, ctxProd, ctxQual);
+          en.outlier = newState;
+          // Update button & row
+          btn.classList.toggle('scma-btn-outlier--on', newState);
+          btn.title = newState ? '取消异常标记' : '标为异常值';
+          btn.textContent = newState ? '⚠ 异常' : '⚠';
+          btn.closest('.scma-pe').classList.toggle('scma-pe--outlier', newState);
+          // Re-render current tab so price span style updates
+          refreshCurrentTab();
+        };
+      });
+    }
 
     // Position near click, keep within viewport
     const vw = window.innerWidth, vh = window.innerHeight;
@@ -663,6 +1032,47 @@
 
   function hideQuotePopup() {
     if (_popupEl) _popupEl.style.display = 'none';
+  }
+
+  // ── Outlier management ────────────────────────────────────────────────
+  function toggleOutlier(company, msgTime, prod, quality) {
+    const key = priceHistoryKey();
+    let history = [];
+    try { history = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_) {}
+    const idx = history.findIndex(e =>
+      e.company === company && e.msgTime === msgTime && e.prod === prod && e.quality === quality
+    );
+    if (idx === -1) return false;
+    history[idx] = { ...history[idx], outlier: !history[idx].outlier };
+    try { localStorage.setItem(key, JSON.stringify(history)); } catch (_) {}
+    return history[idx].outlier;
+  }
+
+  function refreshCurrentTab() {
+    if (!panelEl) return;
+    const activeTab = panelEl.querySelector('.scma-tab--on')?.dataset?.tab;
+    if (activeTab === 'hist') {
+      renderHistoryTab();
+    } else if (_lastSummary) {
+      // Merge updated outlier flags into _lastSummary entries from storage
+      const histMap = new Map();
+      try {
+        const raw = JSON.parse(localStorage.getItem(priceHistoryKey()) || '[]');
+        for (const e of raw) histMap.set(`${e.company}|${e.msgTime}|${e.prod}|${e.quality}`, e.outlier || false);
+      } catch (_) {}
+      for (const prod of Object.keys(_lastSummary)) {
+        for (const qual of Object.keys(_lastSummary[prod])) {
+          for (const dir of ['buy', 'sell']) {
+            for (const priceEntry of (_lastSummary[prod][qual][dir] || [])) {
+              for (const en of priceEntry.entries) {
+                en.outlier = histMap.get(`${en.name}|${en.msgTime}|${prod}|${qual}`) || false;
+              }
+            }
+          }
+        }
+      }
+      renderResults(panelEl.querySelector('#scma-results'), _lastSummary, _lastQuotes, _lastMsgs);
+    }
   }
 
   function escHtml(s) {
@@ -934,6 +1344,8 @@
     const AERO_W = 430, GAP = 10, BASE = 18;
     if (panelEl)    panelEl.style.right = BASE + 'px';
     if (mktPanelEl) mktPanelEl.style.right = (panelEl ? AERO_W + GAP + BASE : BASE) + 'px';
+    // 图表面板固定在左下角，独立于右侧两个面板
+    if (chartPanelEl) { chartPanelEl.style.left = BASE + 'px'; chartPanelEl.style.right = ''; }
   }
 
   // ── Watchlist persistence ─────────────────────────────────────────────
@@ -967,7 +1379,7 @@
         </div>
       </div>
       <div id="scma-mkt-controls">
-        <label>时 <input id="scma-mkt-hours" type="number" value="2" min="1" max="8"></label>
+        <label>时 <input id="scma-mkt-hours" type="number" value="2" min="1" max="24"></label>
         <label>聊天室 <select id="scma-mkt-room">
           <option value="S">Sales</option>
           <option value="X">Aerospace sales</option>
@@ -1040,8 +1452,8 @@
     mktPanelEl.querySelector('#scma-mkt-results').addEventListener('click', e => {
       const span = e.target.closest('[data-ci]');
       if (!span) return;
-      const entries = _ciMap.get(parseInt(span.dataset.ci));
-      if (entries) showQuotePopup(e.clientX, e.clientY, entries);
+      const ciData = _ciMap.get(parseInt(span.dataset.ci));
+      if (ciData) showQuotePopup(e.clientX, e.clientY, ciData);
     });
 
     makeDraggable(mktPanelEl, mktPanelEl.querySelector('#scma-mkt-header'));
@@ -1305,7 +1717,7 @@
       });
       for (const qk of qkeys) {
         const fmtDir = (dirMap) => Object.values(dirMap).map(grp => {
-          const ci = _ciNext++; _ciMap.set(ci, grp.entries);
+          const ci = _ciNext++; _ciMap.set(ci, { entries: grp.entries, prod: null, qual: null });
           const allR = grp.entries.every(e => e.retracted);
           const label = grp.price ? formatMktPrice(grp.price) : '?';
           return `<span class="scma-price${allR ? ' scma-price--retracted' : ''}" title="${grp.entries.map(e=>e.name).join('\n')}" data-ci="${ci}">${escHtml(label)}<sup>×${grp.entries.length}</sup></span>`;
@@ -1490,6 +1902,8 @@
       }
       .scma-price:hover { color: #fff; }
       .scma-price--retracted { text-decoration: line-through; opacity: .5; }
+      .scma-price--outlier { text-decoration: line-through; color: #f97316 !important; opacity: .6; }
+      .scma-price--has-outlier { color: #fb923c !important; }
       .scma-price sup {
         font-size: 8px; color: #94a3b8; margin-left: 1px;
       }
@@ -1539,6 +1953,15 @@
       .scma-pe--retracted { opacity: .7; }
       .scma-pe--retracted .scma-pe-name > span { text-decoration: line-through; text-decoration-color: #f87171; }
       .scma-pe--retracted .scma-pe-body { text-decoration: line-through; text-decoration-color: #f87171; }
+      .scma-pe--outlier { background: rgba(249,115,22,.08); }
+      .scma-pe--outlier .scma-pe-name { color: #f97316; }
+      .scma-btn-outlier {
+        margin-left: auto; font-size: 9px; padding: 1px 5px; border-radius: 3px;
+        border: 1px solid #475569; background: transparent; color: #94a3b8;
+        cursor: pointer; white-space: nowrap;
+      }
+      .scma-btn-outlier:hover { border-color: #f97316; color: #f97316; }
+      .scma-btn-outlier--on { border-color: #f97316; color: #f97316; background: rgba(249,115,22,.15); }
       .scma-pe-retract-badge {
         font-size: 9px; color: #f87171; border: 1px solid #7f1d1d;
         border-radius: 3px; padding: 0 4px; font-weight: normal;
@@ -1608,6 +2031,52 @@
       }
       .scma-help-tag.buy  { background: #14532d; color: #86efac; }
       .scma-help-tag.sell { background: #7f1d1d; color: #fca5a5; }
+
+      /* ── Aero panel tab bar ── */
+      #scma-tabs {
+        display: flex; border-bottom: 1px solid #334155; flex-shrink: 0;
+      }
+      .scma-tab {
+        flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
+        color: #475569; font-size: 11px; padding: 5px; cursor: pointer;
+        font-family: inherit; transition: color .15s; user-select: none;
+      }
+      .scma-tab:hover { color: #94a3b8; }
+      .scma-tab--on { color: #7dd3fc; border-bottom-color: #3b82f6; }
+
+      /* ── Tab content wrappers ── */
+      #scma-tab-live {
+        flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+      }
+      #scma-tab-hist {
+        flex: 1; flex-direction: column; overflow: hidden; min-height: 0;
+      }
+
+      /* ── History tab controls ── */
+      #scma-hist-controls {
+        display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+        padding: 7px 12px; background: #1e293b;
+        border-bottom: 1px solid #334155; flex-shrink: 0;
+      }
+      #scma-hist-controls label {
+        font-size: 11px; color: #94a3b8;
+        display: flex; align-items: center; gap: 4px;
+      }
+      #scma-hist-controls select, #scma-hist-controls input[type="datetime-local"] {
+        background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 4px;
+        padding: 2px 5px; font-size: 11px; font-family: inherit; cursor: pointer;
+      }
+      #scma-hist-controls input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+        filter: invert(0.6);
+      }
+      #scma-hist-refresh {
+        background: #1e3a5f; color: #93c5fd; border: 1px solid #3b82f6;
+        border-radius: 5px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+      }
+      #scma-hist-refresh:hover { background: #2a4f7a; }
+      #scma-hist-info { color: #475569; font-size: 10px; margin-left: auto; }
+      #scma-hist-results { padding: 10px 12px; overflow-y: auto; flex: 1; }
 
       /* ── Market panel ── */
       #scma-mkt-panel {
@@ -1810,6 +2279,55 @@
       #scma-mkt-about-ver a { color: #93c5fd; text-decoration: none; }
       #scma-mkt-about-ver a:hover { text-decoration: underline; }
       #scma-mkt-update-status { color: #86efac; }
+
+      /* ── Chart panel ── */
+      #scma-ch-panel {
+        position: fixed; bottom: 58px; left: 18px; z-index: 2147483637;
+        width: 560px; max-height: 82vh;
+        display: flex; flex-direction: column;
+        background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 12px;
+        font-family: 'Consolas', 'Courier New', monospace; font-size: 12px;
+        box-shadow: 0 8px 30px #0009; overflow: hidden;
+      }
+      #scma-ch-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 9px 13px; background: #1e293b;
+        border-bottom: 1px solid #334155;
+        font-weight: 700; color: #7dd3fc; font-size: 13px;
+        border-radius: 12px 12px 0 0; flex-shrink: 0; user-select: none;
+        cursor: move;
+      }
+      #scma-ch-header button {
+        background: none; border: none; cursor: pointer;
+        color: #64748b; font-size: 14px; line-height: 1;
+      }
+      #scma-ch-header button:hover { color: #f87171; }
+      #scma-ch-controls {
+        display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+        padding: 7px 12px; background: #1e293b;
+        border-bottom: 1px solid #334155; flex-shrink: 0;
+      }
+      #scma-ch-controls label {
+        font-size: 11px; color: #94a3b8;
+        display: flex; align-items: center; gap: 4px;
+      }
+      #scma-ch-controls select {
+        background: #0f172a; color: #e2e8f0;
+        border: 1px solid #334155; border-radius: 4px;
+        padding: 2px 5px; font-size: 11px; font-family: inherit; cursor: pointer;
+      }
+      #scma-ch-controls input[type="checkbox"] { cursor: pointer; }
+      #scma-ch-body {
+        position: relative; padding: 12px;
+        height: 320px; flex-shrink: 0;
+      }
+      #scma-ch-canvas { display: block; }
+      #scma-ch-empty {
+        display: none; position: absolute; inset: 0;
+        align-items: center; justify-content: center;
+        color: #475569; font-size: 13px;
+      }
 
       /* ── Responsive: tablet (≤600px) ── */
       @media (max-width: 600px) {
