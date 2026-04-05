@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SimCo 市场报价分析器
 // @namespace    simco-market-quote-analyzer
-// @version      1.27
+// @version      1.29
 // @description  实时抓取并解析 SimCompanies 聊天室中的买卖报价；支持航天产品（SOR/BFR/JUM/LUX/SEP/SAT）专项分析与全品类关注列表查询
 // @author
 // @match        https://www.simcompanies.com/*
@@ -175,7 +175,28 @@
     ).sort((a, b) => a.msgTime - b.msgTime);
 
     if (outlier) {
+      // 1. 过滤手动标记的异常值
       pts = pts.filter(e => !e.outlier);
+      // 2. 自动过滤：按「品质+方向」分组，删除偏离中位数 2 倍以上的点
+      if (pts.length >= 3) {
+        const medianOf = arr => {
+          const s = [...arr].sort((a, b) => a - b);
+          const m = Math.floor(s.length / 2);
+          return s.length % 2 === 0 ? (s[m - 1] + s[m]) / 2 : s[m];
+        };
+        const groups = new Map();
+        for (const e of pts) {
+          const k = `${e.quality}|${e.direction}`;
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k).push(e.price);
+        }
+        pts = pts.filter(e => {
+          const prices = groups.get(`${e.quality}|${e.direction}`);
+          if (prices.length < 3) return true; // 数据点不足，不过滤
+          const med = medianOf(prices);
+          return e.price >= med / 2 && e.price <= med * 2;
+        });
+      }
     }
 
     const infoEl  = chartPanelEl.querySelector('#scma-ch-info');
@@ -804,15 +825,18 @@
     const sp = /[@$]\s*(\d{1,4}(?:\.\d+)?)\/(\d{1,4}(?:\.\d+)?)\s*[kK]/.exec(t);
     if (sp) prices = [Math.round(parseFloat(sp[1]) * 1000), Math.round(parseFloat(sp[2]) * 1000)];
 
+    // Helper: scale raw number — if k present always ×1000; if absent ×1000 only when ≤9999
+    const scaleK = (raw, hasK) => Math.round(hasK || raw <= 9999 ? raw * 1000 : raw);
+
     // Single price
     let price = null, m;
-    // "at 34.5k" or "at 34.5" (k optional — aerospace prices always in thousands)
-    m = /\bat\s+(\d{1,4}(?:\.\d+)?)\s*[kK]?/i.exec(t);
-    if (m) { price = Math.round(parseFloat(m[1]) * 1000); }
+    // "at 34.5k" or "at 34.5" or "at 130500"
+    m = /\bat\s+(\d{1,6}(?:\.\d+)?)\s*([kK])?/i.exec(t);
+    if (m) { price = scaleK(parseFloat(m[1]), m[2]); }
     if (!price) {
-      // "@34.5k" or "@34.5" or "$34.5k" or "$34.5"
-      m = /[@$]\s*(\d{1,4}(?:\.\d+)?)\s*[kK]?(?![a-zA-Z/])/.exec(t);
-      if (m) price = Math.round(parseFloat(m[1]) * 1000);
+      // "@34.5k" / "@34.5" / "@130500" / "$90000"
+      m = /[@$]\s*(\d{1,6}(?:\.\d+)?)\s*([kK])?(?![a-zA-Z/\d])/.exec(t);
+      if (m) price = scaleK(parseFloat(m[1]), m[2]);
     }
     if (!price) {
       const tc = delta !== null
